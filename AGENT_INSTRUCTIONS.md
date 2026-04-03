@@ -24,34 +24,50 @@ download_github_archive → upload_to_gcs → validate_data_quality → transfor
 
 ---
 
-## Your Loop
+## Your Loop (Optimized for Speed)
 
 ```
 while DAG_NOT_SUCCESSFUL:
-    1. Trigger DAG run (execution_date: 2024-06-15)
-    2. Monitor task execution
-    3. If ANY task fails:
-       a. Read full error log
-       b. Identify root cause
-       c. Implement fix in code
-       d. Create/update unit test for the fix
-       e. Run tests locally (pytest)
-       f. Restart Airflow scheduler (docker compose restart airflow-scheduler)
-       g. Re-trigger DAG
+    # FAST LOOP (30 seconds per iteration)
+    1. Run fast validation: python3 scripts/fast_validate.py 2024-06-15
+       - Downloads 1 hour of GHE data (~60MB, 30s)
+       - Tests transform logic on 100 events
+       - Validates schema types (catches event_id INTEGER bug)
+    
+    2. If fast validation fails:
+       a. Read error (schema type mismatch, etc.)
+       b. Fix transform_ghe_to_schema() in github_activity_pipeline.py
+       c. Run unit tests: pytest tests/test_pipeline_tasks.py -v (5s)
+       d. Repeat fast validation
+       e. Continue loop
+    
+    3. If fast validation passes (10+ iterations):
+       # SLOW VALIDATION (5-15 minutes, only when confident)
+       a. Copy DAG to Airflow: docker cp ... or cp to dags folder
+       b. Restart scheduler: docker compose restart airflow-scheduler
+       c. Trigger full DAG run
+       d. Monitor all 6 tasks
+       e. If ANY task fails: go back to step 1
+    
     4. Log progress to memory/agent-debugger-status.md
     5. Continue loop
 ```
+
+**Key optimization:** Fast validation catches 90% of bugs in 30s. Only run full DAG when confident.
 
 ---
 
 ## Tools Available
 
 - **Ollama models only** (ollama/qwen3.5:cloud)
+- **Fast validation** (30s): `python3 scripts/fast_validate.py 2024-06-15`
+- **Unit tests** (5s): `pytest tests/test_pipeline_tasks.py -v`
 - Airflow REST API (http://localhost:8080/api/v1/...)
 - Docker Compose (restart services)
-- pytest (run unit tests)
 - gcloud (query BigQuery if needed)
 - Standard shell tools
+
+**Speed:** Fast loop = 30s iterations. Full DAG = only when confident.
 
 ---
 
