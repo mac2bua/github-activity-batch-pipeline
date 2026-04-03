@@ -125,9 +125,16 @@ def download_github_archive(**context: Any) -> str:
     Fetches hourly JSON.gz files from data.gharchive.org for all 24 hours of
     the execution date. Files are stored temporarily for upload to GCS.
     
-    Note: GHE Archive data availability varies. Some dates/hours may be missing.
-    The task succeeds as long as at least one file is downloaded.
-    For testing, use dates from 2011 onwards with better coverage (e.g., 2024-06-15).
+    Note: GHE Archive data availability varies by date and hour.
+    Some dates may only have partial hourly coverage. The task succeeds
+    as long as at least one file is downloaded.
+    
+    Known patterns:
+    - Some dates only have hours 11-23 (e.g., 2026-03-01)
+    - Older dates (2011+) generally have better coverage
+    - Very recent dates may have no data yet
+    
+    For testing, try: 2024-06-15, 2023-01-01, or 2011-02-20
 
     Args:
         **context: Airflow context containing execution_date.
@@ -143,6 +150,7 @@ def download_github_archive(**context: Any) -> str:
     failed_downloads: list[tuple[str, str]] = []
 
     logger.info("Starting download for date: %s", date_str)
+    logger.info("Note: Some hours may not be available. This is normal for certain dates.")
 
     for hour in range(24):
         hour_str = f"{hour:02d}"
@@ -156,30 +164,60 @@ def download_github_archive(**context: Any) -> str:
             with open(local_path, 'wb') as f:
                 f.write(response.content)
             downloaded_files.append(str(local_path))
-            logger.info("Downloaded: %s", filename)
+            logger.info("Downloaded: %s (%.2f KB)", filename, len(response.content) / 1024)
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                # 404 is expected for some hours - just log as debug
+                logger.debug("File not available: %s (404)", filename)
+                failed_downloads.append((filename, '404'))
+            else:
+                logger.warning("HTTP error for %s: %s", filename, e)
+                failed_downloads.append((filename, str(e)))
         except Exception as e:
-            error_msg = str(e)
-            logger.warning("Failed to download %s: %s", filename, error_msg)
-            failed_downloads.append((filename, error_msg))
+            logger.warning("Failed to download %s: %s", filename, e)
+            failed_downloads.append((filename, str(e)))
 
     # Push downloaded files list to XCom for downstream tasks
     context['ti'].xcom_push(key='downloaded_files', value=downloaded_files)
 
     success_count = len(downloaded_files)
+    failure_count = len(failed_downloads)
+    
     logger.info(
         "Download complete: %d/24 files succeeded, %d failed",
         success_count,
-        len(failed_downloads)
+        failure_count
     )
-
+    
+    # Log which hours were successful (helpful for debugging)
+    if success_count > 0:
+        successful_hours = []
+        for f in downloaded_files:
+            # Extract hour from filename: 2024-01-02-00.json.gz -> 00
+            hour = Path(f).stem.split('-')[-1]
+            successful_hours.append(hour)
+        logger.info("Successful hours: %s to %s", 
+                   min(successful_hours), max(successful_hours))
+    
     # Warn if many files failed, but don't fail the task
-    if len(failed_downloads) > 12:
+    if failure_count > 12:
         logger.warning(
-            "More than half of files failed to download. "
-            "Consider using a different date with better data availability."
+            "More than half of files failed to download (%d/24). "
+            "This may be normal for certain dates. "
+            "Try a different date if you need more data.",
+            failure_count
         )
-
-    return f"Downloaded {success_count} files for {date_str}"
+    
+    # Task succeeds as long as we got at least one file
+    if success_count == 0:
+        logger.error(
+            "No files downloaded for %s. "
+            "Try a different date (e.g., 2024-06-15, 2023-01-01, or 2011-02-20)",
+            date_str
+        )
+        # Still return success string - upstream tasks will handle empty data
+    
+    return f"Downloaded {success_count}/24 files for {date_str}"
 
 
 def upload_to_gcs(**context: Any) -> str:
@@ -188,6 +226,9 @@ def upload_to_gcs(**context: Any) -> str:
 
     Uploads all downloaded .json.gz files from the temporary directory
     to the configured GCS bucket under the 'data/' prefix.
+    
+    If no files were downloaded, this task will log a warning but still succeed.
+    The downstream validate task will catch the empty data case.
 
     Args:
         **context: Airflow context (not used but required by signature).
@@ -204,6 +245,14 @@ def upload_to_gcs(**context: Any) -> str:
     files = glob.glob(pattern)
 
     logger.info("Found %d files to upload to GCS", len(files))
+    
+    if len(files) == 0:
+        logger.warning(
+            "No files found to upload. "
+            "This may be because download task got no data for this date. "
+            "Try a different execution date."
+        )
+        return "No files to upload (download got no data)"
 
     for file_path in files:
         object_name = f'data/{os.path.basename(file_path)}'
