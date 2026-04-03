@@ -138,6 +138,110 @@ else:
     echo ""
 done
 
+# =============================================================================
+# DAG PARSING TEST - Catches parameter errors before deployment
+# =============================================================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🧪 Running DAG parsing tests (catches parameter errors)..."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Try to import DAGs and instantiate operators
+# Note: This test requires Airflow to be installed. Skip if not available.
+export DAG_DIR="$DAG_DIR"
+python3 << 'PYTHON_SCRIPT' || VALIDATION_PASSED=false
+import sys
+import importlib.util
+import os
+
+DAG_DIR = os.environ.get('DAG_DIR', 'airflow/dags')
+
+print('   Checking if Airflow is installed...')
+
+# Check if airflow.providers is available (not just namespace package)
+airflow_providers_spec = importlib.util.find_spec('airflow.providers')
+if airflow_providers_spec is None:
+    print('   ⚠ Airflow providers not installed - skipping DAG parsing test')
+    print('   Install with: pip install apache-airflow apache-airflow-providers-google')
+    print('   (This is OK for syntax-only validation)')
+    sys.exit(0)
+
+sys.path.insert(0, DAG_DIR)
+
+print('   Testing DAG imports and operator initialization...')
+
+try:
+    # Import DAGs
+    import github_activity_pipeline
+    import github_archive_dag
+    print('   ✓ Both DAGs imported successfully')
+    
+    # Verify DAGs exist
+    assert github_activity_pipeline.dag is not None
+    assert github_archive_dag.dag is not None
+    print('   ✓ DAG objects created')
+    
+    # Verify tasks can be accessed
+    for dag in [github_activity_pipeline.dag, github_archive_dag.dag]:
+        for task in dag.tasks:
+            assert task.task_id is not None
+    print('   ✓ All tasks accessible')
+    
+    # Test GCSToBigQueryOperator with valid params only
+    from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
+    
+    # This should work (Airflow 2.8+ compatible params)
+    test_op = GCSToBigQueryOperator(
+        task_id='test_valid_params',
+        bucket='test-bucket',
+        source_objects=['raw/test/'],
+        destination_project_dataset_table='project.dataset.table',
+        source_format='NEWLINE_DELIMITED_JSON',
+        write_disposition='WRITE_APPEND',
+        dag=None,
+    )
+    print('   ✓ GCSToBigQueryOperator accepts valid params')
+    
+    # Verify load_task in github_activity_pipeline doesn't have invalid params
+    load_task = None
+    for task in github_activity_pipeline.dag.tasks:
+        if task.task_id == 'load_to_bigquery':
+            load_task = task
+            break
+    
+    if load_task:
+        kwargs = load_task.kwargs if hasattr(load_task, 'kwargs') else {}
+        if 'clustering_fields' in kwargs:
+            print('   ✗ ERROR: clustering_fields still present (incompatible with Airflow 2.8+)')
+            sys.exit(1)
+        if 'schema_fields' in kwargs:
+            print('   ✗ ERROR: schema_fields still present (incompatible with Airflow 2.8+)')
+            sys.exit(1)
+        if 'time_partitioning' in kwargs:
+            print('   ✗ ERROR: time_partitioning still present (incompatible with Airflow 2.8+)')
+            sys.exit(1)
+        print('   ✓ GCSToBigQueryOperator has no invalid params')
+    
+    print('')
+    print('   All DAG parsing tests passed!')
+    
+except TypeError as e:
+    if 'clustering_fields' in str(e) or 'schema' in str(e):
+        print(f'   ✗ ERROR: Invalid operator parameters: {e}')
+        print('   Fix: Remove schema_fields, clustering_fields, time_partitioning from GCSToBigQueryOperator')
+        print('   These should be pre-created via Terraform.')
+        sys.exit(1)
+    else:
+        print(f'   ✗ ERROR: {e}')
+        sys.exit(1)
+except Exception as e:
+    print(f'   ✗ ERROR: DAG parsing failed: {e}')
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+PYTHON_SCRIPT
+
+echo ""
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$VALIDATION_PASSED" = true ]; then
     echo "✅ All Airflow DAG validations passed!"

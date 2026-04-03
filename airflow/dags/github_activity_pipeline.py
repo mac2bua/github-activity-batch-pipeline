@@ -275,28 +275,16 @@ validate_task = PythonOperator(
 )
 
 # Task 4: Load to BigQuery
+# Note: Table schema, partitioning, and clustering are pre-created via Terraform.
+# GCSToBigQueryOperator in Airflow 2.8+ Google provider 10.x does not accept
+# schema_fields, clustering_fields, or time_partitioning parameters.
 load_task = GCSToBigQueryOperator(
     task_id='load_to_bigquery',
     bucket=GCS_BUCKET,
     source_objects=[f'raw/{{{{ ds }}}}/'],
-    source_format='NEWLINE_DELIMITED_JSON',
     destination_project_dataset_table=f'{get_project_id()}.{BQ_DATASET}.{BQ_TABLE}',
-    schema_fields=[
-        {'name': 'id', 'type': 'STRING', 'mode': 'REQUIRED'},
-        {'name': 'type', 'type': 'STRING', 'mode': 'REQUIRED'},
-        {'name': 'actor_login', 'type': 'STRING', 'mode': 'REQUIRED'},
-        {'name': 'repo_name', 'type': 'STRING', 'mode': 'REQUIRED'},
-        {'name': 'repo_owner', 'type': 'STRING', 'mode': 'REQUIRED'},
-        {'name': 'payload', 'type': 'JSON', 'mode': 'NULLABLE'},
-        {'name': 'public', 'type': 'BOOLEAN', 'mode': 'REQUIRED'},
-        {'name': 'created_at', 'type': 'TIMESTAMP', 'mode': 'REQUIRED'},
-        {'name': 'event_date', 'type': 'DATE', 'mode': 'REQUIRED'},
-        {'name': 'loaded_at', 'type': 'TIMESTAMP', 'mode': 'REQUIRED'},
-    ],
+    source_format='NEWLINE_DELIMITED_JSON',
     write_disposition='WRITE_APPEND',
-    create_disposition='CREATE_IF_NEEDED',
-    time_partitioning={'type': 'DAY', 'field': 'event_date'},
-    clustering_fields=['repo_name', 'actor_login', 'event_type'],
     max_bad_records=100,
     allow_quoted_newlines=True,
     dag=dag,

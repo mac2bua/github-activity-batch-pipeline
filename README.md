@@ -255,6 +255,52 @@ gcloud billing budgets create \
 
 ---
 
+## 🧪 Testing
+
+### Running Tests
+
+```bash
+# Unit tests (structure validation)
+pytest tests/test_airflow_dag.py -v
+
+# Integration tests (operator initialization)
+pytest tests/test_airflow_integration.py -v
+
+# All tests
+make test
+```
+
+### Testing Limitations and How We Address Them
+
+**Why the original tests didn't catch the `GCSToBigQueryOperator` parameter error:**
+
+The initial test suite (`test_airflow_dag.py`) only validated DAG **structure**:
+- ✅ DAG imports without syntax errors
+- ✅ Tasks exist with correct IDs
+- ✅ Dependencies are defined
+- ✅ Configuration values are present
+
+**What it didn't test:**
+- ❌ Whether operators can be **initialized** with the given parameters
+- ❌ Whether parameters are **compatible** with the installed Airflow version
+- ❌ Runtime errors from operator constructors
+
+This is why the `clustering_fields` parameter error only appeared when the DAG was actually loaded in Airflow 2.8+ with Google provider 10.x.
+
+**How we fixed it:**
+
+Added `test_airflow_integration.py` which:
+1. **Actually instantiates operators** with their parameters
+2. **Tests DAG parsing** end-to-end (imports + task creation)
+3. **Validates parameter compatibility** with Airflow 2.8+
+4. **Catches TypeError** from invalid parameters before deployment
+
+The validation script (`scripts/validate_airflow.sh`) now includes a DAG parsing test that catches these errors during CI/CD.
+
+**Key lesson:** Structure tests ≠ Runtime tests. Always test operator initialization with actual parameters.
+
+---
+
 ## 🔧 Troubleshooting
 
 ### Airflow containers restarting
