@@ -29,6 +29,7 @@ services:
 
   airflow-webserver:
     image: apache/airflow:2.8.0
+    command: webserver
     environment:
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -64,6 +65,7 @@ services:
 
   airflow-scheduler:
     image: apache/airflow:2.8.0
+    command: scheduler
     environment:
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -97,6 +99,7 @@ services:
 
   airflow-worker:
     image: apache/airflow:2.8.0
+    command: celery worker
     environment:
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
