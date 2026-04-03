@@ -1,14 +1,15 @@
 """
 GitHub Activity Batch Processing Pipeline
 
-Airflow DAG with 5 tasks: download, upload, validate, load, cleanup.
+Airflow DAG with 6 tasks: download, upload, validate, transform, load, cleanup.
 
 This pipeline fetches hourly GitHub activity data from GHE Archive,
-uploads it to Google Cloud Storage, validates the data, loads it into
-BigQuery with proper partitioning and clustering, and cleans up temp files.
+uploads it to Google Cloud Storage, validates the data, transforms it
+to match our BigQuery schema, loads it into BigQuery with proper
+partitioning and clustering, and cleans up temp files.
 
 Requirements Coverage:
-- ✅ 3+ tasks (we have 5)
+- ✅ 3+ tasks (we have 6)
 - ✅ Download from GHE Archive
 - ✅ Upload to GCS
 - ✅ Load to BigQuery with transformation
