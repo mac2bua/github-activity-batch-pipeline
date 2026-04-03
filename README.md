@@ -55,12 +55,27 @@ GitHub Archive (gharchive.org)
 ## ✅ Prerequisites
 
 | Tool | Version | Install |
-|------|---------|---------|
-| Python | 3.9+ | `python3 --version` |
+|------|---------|---------|  
+| Python | 3.9-3.12 | `python3 --version` (see note below) |
 | Docker | 20.10+ | [docker.com](https://docs.docker.com/get-docker/) |
 | Terraform | 1.0+ | [terraform.io](https://developer.hashicorp.com/terraform/install) |
 | gcloud CLI | Latest | See [Setup Guide](#4-install-gcloud-cli) |
 | Git | Any | Pre-installed on macOS |
+
+**⚠️ Python Version Note:**
+
+If you have Python 3.13+ (like macOS with Homebrew), you have two options:
+
+**Option A: Use Docker (Recommended)**
+- Airflow runs in Docker with Python 3.9
+- You only need local Python to generate Fernet key
+- Install only `cryptography` package locally
+
+**Option B: Install Python 3.11**
+```bash
+brew install python@3.11
+python3.11 -m venv .venv
+```
 
 **Check what you have:**
 ```bash
@@ -229,7 +244,9 @@ gcloud projects list
 
 ---
 
-### 5. Set Up Python Environment
+### 5. Set Up Python Environment (Minimal)
+
+**⚠️ If you have Python 3.13+:** Don't worry! Airflow runs in Docker with Python 3.9. You only need local Python to generate the Fernet key.
 
 **Create Virtual Environment:**
 ```bash
@@ -240,24 +257,35 @@ python3 -m venv .venv
 
 # Activate (macOS/Linux)
 source .venv/bin/activate
-
-# Activate (Windows)
-# .venv\Scripts\activate
 ```
 
-**Install Dependencies:**
+**Install ONLY Cryptography (for Fernet key generation):**
 ```bash
-pip install -r requirements.txt
+# This works on Python 3.13+
+pip install cryptography==44.0.0
 ```
 
-**Verify Installation:**
+**Generate Fernet Key:**
 ```bash
-python3 -c "from cryptography.fernet import Fernet; print('OK')"
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Copy the output (long base64 string ending in ==)
 ```
+
+**That's it!** You don't need to install Airflow, dbt, or other packages locally. Everything runs in Docker.
 
 **Deactivate when done:**
 ```bash
 deactivate
+```
+
+**Alternative: Python 3.11**
+
+If you prefer to install packages locally, use Python 3.11:
+```bash
+brew install python@3.11
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ---
@@ -410,7 +438,7 @@ airflow dags trigger github_activity_batch_pipeline \
 ```bash
 # Count events for the day
 bq query --use_legacy_sql=false \
-  "SELECT COUNT(*) FROM github_activity.github_events 
+  "SELECT COUNT(*) FROM github_activity.github_events
    WHERE event_date = '2024-01-15'"
 
 # Expected: 50,000-200,000 events
@@ -482,7 +510,7 @@ gsutil du -sh gs://github-activity-batch-raw-<project_id>/
    -- ✅ GOOD
    SELECT * FROM github_activity.github_events
    WHERE event_date = '2024-01-15'
-   
+
    -- ❌ BAD (scans entire table)
    SELECT * FROM github_activity.github_events
    ```
