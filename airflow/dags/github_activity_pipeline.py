@@ -431,13 +431,12 @@ def transform_ghe_to_schema(**context: Any) -> str:
                             continue
             
             # Upload transformed file
-            with open(tmp_path, 'rb') as f:
-                hook.upload(
-                    bucket_name=GCS_BUCKET,
-                    object_name=output_filename,
-                    file_data=f.read(),
-                    mime_type='application/gzip'
-                )
+            hook.upload(
+                bucket_name=GCS_BUCKET,
+                object_name=output_filename,
+                filename=tmp_path,
+                mime_type='application/gzip'
+            )
             
             transformed_files.append(output_filename)
             logger.info("Uploaded transformed: %s", output_filename)
