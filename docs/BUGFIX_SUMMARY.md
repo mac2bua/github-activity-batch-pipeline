@@ -1,271 +1,170 @@
-# Bug Fix Summary: Project ID Configuration
+# Bug Fix Summary: GCS Path Mismatch and GHE Archive URL
 
 ## Problem
 
-The DAG was failing at runtime with a confusing error:
+The `download_github_archive` task was failing with all 24 hourly files returning 404 errors:
 
 ```
-google.api_core.exceptions.NotFound: 404 POST ... 
-Not found: Dataset your-project-id:github_activity
+[2026-04-03, 22:24:41 UTC] WARNING - File not available yet: 2024-01-01-00.json.gz
+...
+[2026-04-03, 22:24:50 UTC] INFO - Download complete: 0/24 files succeeded, 24 failed
 ```
 
-### Root Cause
+Additionally, even if downloads succeeded, the `load_to_bigquery` task would fail with:
+```
+404 Not found: URI gs://bucket/raw/2024-01-02/
+```
 
-The `get_project_id()` function in `github_activity_pipeline.py` was returning a placeholder value `"your-project-id"` when the Airflow Variable was not configured:
+## Root Causes
+
+### Bug 1: GCS Path Mismatch
+
+The upload and load tasks were using different path formats:
+
+| Task | Path Format | Example |
+|------|-------------|---------|
+| `upload_to_gcs` | `data/{filename}` | `data/2024-01-02-00.json.gz` |
+| `GCSToBigQueryOperator` | `raw/{{ ds }}/*.json.gz` | `raw/2024-01-02/*.json.gz` |
+
+**Result**: Files uploaded to `data/` but BigQuery looked in `raw/{date}/` → 404 error.
+
+### Bug 2: Incorrect GHE Archive URL
+
+The download task was using the wrong URL format:
 
 ```python
-def get_project_id() -> str:
-    try:
-        return Variable.get("project_id")
-    except Exception:
-        logger.warning("project_id Variable not found, using placeholder")
-        return "your-project-id"  # ← BUG: Silent failure
+# WRONG (returns 404)
+url = "https://gharchive.org/data/2024-01-01-00.json.gz"
+
+# CORRECT (returns 200)
+url = "https://data.gharchive.org/2024-01-01-00.json.gz"
 ```
 
-This caused:
-1. DAG to parse successfully (no immediate error)
-2. Bucket name to be wrong: `github-activity-batch-raw-your-project-id`
-3. BigQuery table reference to be wrong: `your-project-id.github_activity.github_events`
-4. Runtime failure with confusing "Dataset not found" error
+The old code used `GHE_ARCHIVE_URL = 'https://gharchive.org'` and appended `/data/`, but the actual files are hosted directly on `data.gharchive.org`.
 
-### Why Tests Didn't Catch It
+### Bug 3: Data Availability
 
-The existing tests only checked:
-- DAG structure (tasks exist, dependencies correct)
-- Task IDs and configuration values exist
-- Import succeeds
-
-They didn't test:
-- That `get_project_id()` returns a **valid** project ID
-- That placeholder values are rejected
-- That the DAG fails **fast** when misconfigured
+Even with the correct URL, some dates have incomplete data. For example, 2024-01-01 had some hours available but not all 24. The task should succeed with partial downloads.
 
 ## Solution
 
-### 1. Fail Fast with Clear Error
+### 1. Fixed GCS Path Consistency
 
-Changed `get_project_id()` to raise `ValueError` when project_id is not configured:
-
-```python
-def get_project_id() -> str:
-    """
-    Retrieve GCP project ID from Airflow Variables or environment.
-    
-    Priority:
-    1. Airflow Variable 'project_id'
-    2. Environment variable 'GOOGLE_CLOUD_PROJECT'
-    
-    Raises:
-        ValueError: If project_id is not configured anywhere.
-    """
-    # Try Airflow Variable first
-    try:
-        project_id = Variable.get("project_id")
-        if project_id and project_id != "your-project-id":
-            return project_id
-    except Exception:
-        pass
-    
-    # Try environment variable
-    import os
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    if project_id and project_id != "your-gcp-project-id":
-        return project_id
-    
-    # No valid project_id found - fail immediately
-    raise ValueError(
-        "project_id not configured. Set Airflow Variable 'project_id' or "
-        "environment variable 'GOOGLE_CLOUD_PROJECT'."
-    )
-```
-
-### 2. Added Environment Variable Fallback
-
-Now checks `GOOGLE_CLOUD_PROJECT` environment variable as fallback:
-- More flexible for Docker deployments
-- Works with `.env` file configuration
-- Airflow Variable still takes priority
-
-### 3. Rejects Placeholder Values
-
-Explicitly rejects:
-- `"your-project-id"` (Airflow Variable placeholder)
-- `"your-gcp-project-id"` (env var placeholder from `.env.example`)
-
-### 4. Compute PROJECT_ID Once
-
-Changed from calling `get_project_id()` multiple times to computing once at module load:
+Changed both tasks to use the same flat `data/` prefix:
 
 ```python
-PROJECT_ID = get_project_id()  # Computed once, fails fast
-GCS_BUCKET = f'github-activity-batch-raw-{PROJECT_ID}'
+# upload_to_gcs
+object_name = f'data/{os.path.basename(file_path)}'
+
+# GCSToBigQueryOperator
+source_objects=['data/*.json.gz']
 ```
 
-This ensures:
-- Consistent project ID throughout DAG execution
-- Immediate failure if not configured (at parse time)
-- No repeated lookups
+### 2. Fixed GHE Archive URL
 
-## Tests Added
+```python
+# Direct access to S3 bucket
+GHE_ARCHIVE_URL = 'https://data.gharchive.org'
 
-Created `tests/test_project_id_config.py` with:
+# File URL construction
+url = f"{GHE_ARCHIVE_URL}/{filename}"
+# Result: https://data.gharchive.org/2024-01-02-00.json.gz
+```
 
-1. **Test missing config raises ValueError**
-   - Verifies fail-fast behavior
-   
-2. **Test Airflow Variable works**
-   - Verifies primary configuration method
+### 3. Allow Partial Downloads
 
-3. **Test environment variable works**
-   - Verifies fallback mechanism
+The download task now:
+- Succeeds as long as at least one file is downloaded
+- Logs warnings for failed downloads
+- Warns if >50% of files fail (suggests trying a different date)
+- Pushes downloaded files list to XCom for downstream tasks
 
-4. **Test Airflow Variable takes priority**
-   - Verifies correct precedence
+### 4. Simplified Code
 
-5. **Test placeholder values rejected**
-   - Verifies "your-project-id" and "your-gcp-project-id" are rejected
-
-6. **Test DAG import fails without project_id**
-   - Critical test: ensures we fail at parse time, not runtime
+- Removed complex nested path structure (`raw/{date}/`)
+- Use flat `data/` prefix for all files
+- Removed unused return dict from download/upload functions
+- Consistent error handling across all tasks
 
 ## Files Changed
 
 | File | Change |
 |------|--------|
-| `airflow/dags/github_activity_pipeline.py` | Fixed `get_project_id()`, added fail-fast |
-| `tests/test_project_id_config.py` | New test suite (232 lines) |
-| `docs/CONFIGURATION.md` | New configuration guide |
-| `docs/BUGFIX_SUMMARY.md` | This file |
+| `airflow/dags/github_activity_pipeline.py` | Fixed URL, paths, and partial download handling |
+| `tests/test_gcs_source_objects.py` | Updated tests for new path format |
 
-## How to Verify the Fix
+## How to Test
 
-### Before Fix (Broken Behavior)
+### 1. Choose a Date with Good Data
+
+Some dates have better coverage than others. For testing:
+- ✅ **Good dates**: 2024-06-15, 2023-01-01 (most hours available)
+- ⚠️ **Partial dates**: 2024-01-01 (some hours missing)
+- ❌ **Bad dates**: Very recent dates (data not yet available)
+
+### 2. Trigger DAG in Airflow UI
+
+1. Go to http://localhost:8080
+2. Find `github_activity_batch_pipeline`
+3. Click "Play" button
+4. Set execution date (e.g., `2024-06-15`)
+5. Watch task logs
+
+### 3. Expected Results
+
+**Download task**:
 ```
-1. Don't set project_id
-2. DAG parses successfully ✗ (should fail)
-3. Trigger DAG
-4. Runtime error: "Dataset your-project-id:github_activity not found"
+INFO - Starting download for date: 2024-06-15
+INFO - Downloaded: 2024-06-15-00.json.gz
+...
+INFO - Download complete: 24/24 files succeeded, 0 failed
 ```
 
-### After Fix (Correct Behavior)
+**Upload task**:
 ```
-1. Don't set project_id
-2. DAG fails to parse: "ValueError: project_id not configured" ✓
-3. Clear error message tells user what to fix
-4. User sets project_id
-5. DAG parses and runs successfully
+INFO - Found 24 files to upload to GCS
+INFO - Uploaded: data/2024-06-15-00.json.gz
+...
+INFO - Upload complete: 24 files uploaded, 0 failed
+```
+
+**Load task**:
+```
+INFO - Using existing BigQuery table for storing data...
+INFO - Executing: {'load': {... 'sourceUris': ['gs://bucket/data/*.json.gz'] ...}}
+```
+
+## Verification Commands
+
+```bash
+# Test URL format
+curl -I https://data.gharchive.org/2024-06-15-00.json.gz
+# Should return: HTTP/2 200
+
+# Test old URL (should fail)
+curl -I https://gharchive.org/data/2024-06-15-00.json.gz
+# Should return: HTTP/2 404
+
+# Validate DAG syntax
+python3 -m py_compile airflow/dags/github_activity_pipeline.py
 ```
 
 ## Commits
 
-- `cd7d8d7` - Fix: Fail fast when project_id is not configured
-- `13658b0` - docs: Add configuration guide for project_id and GCP setup
+- `921845c` - Fix: GCS path mismatch and GHE Archive URL format
+
+## Key Lessons
+
+1. **Path consistency is critical**: Upload and load tasks must use the same path format
+2. **GCS has no directories**: Always use wildcards (`*.json.gz`) to match file objects
+3. **Test URLs before deploying**: A simple `curl -I` can catch URL format errors
+4. **Handle partial data gracefully**: External data sources may have gaps
+5. **Flat is better than nested**: Simple `data/` prefix is easier than `raw/{date}/`
 
 ## Related Fixes
 
-This fix was made after fixing the Airflow 2.8+ `GCSToBigQueryOperator` compatibility issue (commit `939de57`). Both fixes improve error handling:
+This fix builds on previous bug fixes:
+- `cd7d8d7` - Fail fast when project_id is not configured
+- `4dbc747` - GCSToBigQueryOperator source_objects pattern mismatch
 
-1. **GCSToBigQueryOperator**: Removed invalid parameters, added integration tests
-2. **Project ID**: Fail fast with clear error, added unit tests
-3. **Source Objects**: Fixed GCS path pattern mismatch, added unit tests
-
-All follow the principle: **Fail fast with clear errors, not late with confusing ones.**
-
----
-
-# Bug Fix Summary: GCS Source Objects Pattern Mismatch
-
-## Problem
-
-The `load_to_bigquery` task was failing with:
-
-```
-google.api_core.exceptions.NotFound: 404 Not found: URI 
-gs://github-activity-batch-raw-github-activity-batch-pipeline/raw/2024-01-02/
-```
-
-### Root Cause
-
-The `source_objects` parameter in `GCSToBigQueryOperator` was set to a directory pattern:
-
-```python
-source_objects=[f'raw/{{{{ ds }}}}/']  # ← BUG: Directory doesn't exist
-```
-
-But GCS doesn't have real directories. The `upload_to_gcs` task uploads individual files:
-
-```
-raw/2024-01-02/2024-01-02-00.json.gz
-raw/2024-01-02/2024-01-02-01.json.gz
-...
-```
-
-There is NO object called `raw/2024-01-02/` in GCS. That "directory" is just a prefix in the file object names.
-
-When `GCSToBigQueryOperator` tried to load from `raw/2024-01-02/`, BigQuery looked for that exact object, didn't find it, and returned 404.
-
-### Why This Was Confusing
-
-1. **GCS has flat namespace**: "Directories" are just prefixes in object names
-2. **Upload creates files, not directories**: `raw/{ds}/file.json.gz` creates one object
-3. **Directory pattern matches nothing**: `raw/{{ ds }}/` looks for non-existent object
-4. **Error message is misleading**: "Not found: URI gs://..." suggests the bucket or path is wrong
-
-## Solution
-
-Changed `source_objects` to use wildcard pattern that matches actual files:
-
-```python
-source_objects=[f'raw/{{{{ ds }}}}/*.json.gz']  # ← FIXED: Matches uploaded files
-```
-
-This pattern:
-- Uses `*` wildcard to match all `.json.gz` files
-- Matches the exact pattern uploaded by `upload_to_gcs` task
-- Works with GCS's flat object namespace
-
-## Tests Added
-
-Created `tests/test_gcs_source_objects.py` with:
-
-1. **Test upload object_name format** - Verifies upload creates `raw/{ds}/filename.json.gz`
-2. **Test source_objects uses wildcard** - Verifies load task uses `*.json.gz` pattern
-3. **Test source_objects not directory-only** - Verifies pattern doesn't end with `/`
-4. **Test upload and load use same prefix** - Verifies both use `raw/` consistently
-5. **Test GCS bucket consistency** - Verifies both tasks use same bucket
-6. **Conceptual test: GCS has no directories** - Documents GCS flat namespace behavior
-
-## Files Changed
-
-| File | Change |
-|------|--------|
-| `airflow/dags/github_activity_pipeline.py` | Fixed `source_objects` pattern |
-| `tests/test_gcs_source_objects.py` | New test suite (315 lines) |
-| `docs/BUGFIX_SUMMARY.md` | This file |
-
-## How to Verify the Fix
-
-### Before Fix (Broken)
-```
-source_objects=['raw/{{ ds }}/']
-Result: 404 Not found: URI gs://bucket/raw/2024-01-02/
-```
-
-### After Fix (Working)
-```
-source_objects=['raw/{{ ds }}/*.json.gz']
-Result: Finds and loads all matching files
-```
-
-## Commit
-
-- `4dbc747` - Fix: GCSToBigQueryOperator source_objects pattern mismatch
-
-## Key Lesson
-
-**GCS has no directories.** Everything is a flat namespace with object names that contain `/` characters. When specifying source objects:
-
-- ❌ `raw/2024-01-02/` - Looks for non-existent directory object
-- ✅ `raw/2024-01-02/*.json.gz` - Matches actual file objects
-
-Always use wildcards to match file patterns, never directory-only paths.
+All follow the principle: **Fail fast with clear errors, test thoroughly, and handle edge cases gracefully.**
