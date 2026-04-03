@@ -413,16 +413,18 @@ def transform_ghe_to_schema(**context: Any) -> str:
                             event_date = created_at_str.split('T')[0] if created_at_str else ''
                             
                             # Transform to target schema
+                            # Note: event_id must be STRING per BigQuery schema
+                            # GHE Archive 'id' field can be numeric, so explicitly convert to string
                             transformed = {
-                                'event_id': event.get('id', ''),
-                                'event_type': event.get('type', ''),
-                                'actor_login': event.get('actor', {}).get('login', ''),
-                                'repo_name': repo_name,
-                                'repo_owner': repo_owner,
+                                'event_id': str(event.get('id', '')),
+                                'event_type': str(event.get('type', '')),
+                                'actor_login': str(event.get('actor', {}).get('login', '')),
+                                'repo_name': str(repo_name),
+                                'repo_owner': str(repo_owner),
                                 'created_at': created_at_str,
                                 'event_date': event_date,
                                 'payload': event.get('payload', {}),
-                                'public': event.get('public', False),
+                                'public': bool(event.get('public', False)),
                                 'loaded_at': datetime.now(timezone.utc).isoformat()
                             }
                             
