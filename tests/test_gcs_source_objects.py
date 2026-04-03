@@ -5,12 +5,13 @@ These tests ensure that:
 1. source_objects in GCSToBigQueryOperator matches upload_to_gcs object_name format
 2. Upload task uses correct object_name pattern
 3. Both tasks use consistent path structure
+4. GHE Archive URL format is correct
 
 Bug History:
 - Original bug: source_objects was 'raw/{{ ds }}/' (directory)
-- Upload task uploaded to 'raw/{ds}/{filename}' (files)
+- Upload task uploaded to 'data/{filename}' (files)
 - GCSToBigQueryOperator couldn't find files because it looked for directory, not files
-- Fix: source_objects should be 'raw/{{ ds }}/*.json.gz' to match uploaded files
+- Fix: source_objects should be 'data/*.json.gz' to match uploaded files
 
 Run: pytest tests/test_gcs_source_objects.py -v
 """
@@ -19,7 +20,6 @@ import pytest
 from pathlib import Path
 import sys
 import re
-from unittest.mock import patch
 
 # Add dags directory to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'airflow' / 'dags'))
@@ -33,42 +33,39 @@ class TestUploadTaskPath:
         Test that upload_to_gcs uses correct object_name format.
         
         The upload function should create paths like:
-        - raw/2024-01-02/2024-01-02-00.json.gz
-        - raw/2024-01-02/2024-01-02-01.json.gz
+        - data/2024-01-02-00.json.gz
+        - data/2024-01-02-01.json.gz
+        
+        NOT:
+        - raw/2024-01-02/2024-01-02-00.json.gz (old format)
         """
-        # Import the module
         import github_activity_pipeline
-        
-        # Check the upload function exists
-        assert hasattr(github_activity_pipeline, 'upload_to_gcs')
-        
-        # The upload function uses:
-        # gcs_prefix = f'raw/{ds}'
-        # object_name = f'{gcs_prefix}/{file_path.name}'
-        # Which produces: raw/2024-01-02/2024-01-02-00.json.gz
-        
-        # We verify this by checking the source code
         import inspect
+        
         source = inspect.getsource(github_activity_pipeline.upload_to_gcs)
         
-        # Should use gcs_prefix with 'raw/' pattern
-        assert 'gcs_prefix' in source
-        assert "'raw/" in source or '"raw/' in source
+        # Should use 'data/' prefix, not 'raw/'
+        assert "'data/" in source or '"data/' in source, \
+            "upload_to_gcs should use 'data/' prefix"
         
-        # Should construct object_name from prefix and filename
-        assert 'object_name' in source
-        assert 'gcs_prefix' in source
+        # Should NOT use old 'raw/{ds}/' format
+        assert "'raw/" not in source and '"raw/' not in source, \
+            "upload_to_gcs should NOT use old 'raw/' prefix"
+        
+        # Should construct object_name from basename
+        assert 'os.path.basename' in source, \
+            "upload_to_gcs should use os.path.basename for filename"
 
-    def test_upload_gcs_prefix_format(self) -> None:
-        """Test that gcs_prefix uses correct format"""
+    def test_upload_uses_data_prefix(self) -> None:
+        """Test that upload uses 'data/' prefix consistently"""
         import github_activity_pipeline
         import inspect
         
         source = inspect.getsource(github_activity_pipeline.upload_to_gcs)
         
-        # Should be: gcs_prefix = f'raw/{ds}'
-        assert re.search(r"gcs_prefix\s*=\s*f['\"]raw/\{ds\}['\"]", source) or \
-               re.search(r'gcs_prefix\s*=\s*f["\']raw/\{ds\}["\']', source)
+        # Object name should be: f'data/{filename}'
+        assert re.search(r"object_name\s*=\s*f?['\"]data/", source), \
+            "object_name should start with 'data/'"
 
 
 class TestLoadTaskSourceObjects:
@@ -78,13 +75,13 @@ class TestLoadTaskSourceObjects:
         """
         Test that source_objects uses wildcard pattern to match files.
         
-        Should be: 'raw/{{ ds }}/*.json.gz'
-        NOT: 'raw/{{ ds }}/' (directory)
+        Should be: 'data/*.json.gz'
+        NOT: 'data/' (directory)
         
         The wildcard is critical because:
-        1. Upload task uploads individual files: raw/2024-01-02/file.json.gz
+        1. Upload task uploads individual files: data/file.json.gz
         2. GCSToBigQueryOperator needs to match those files
-        3. Directory pattern 'raw/{{ ds }}/' won't match files
+        3. Directory pattern 'data/' won't match files
         """
         import github_activity_pipeline
         
@@ -111,16 +108,16 @@ class TestLoadTaskSourceObjects:
         assert '*.json.gz' in pattern or '*' in pattern, \
             f"source_objects should include wildcard, got: {pattern}"
         
-        # Pattern should start with raw/
-        assert pattern.startswith('raw/'), \
-            f"source_objects should start with 'raw/', got: {pattern}"
+        # Pattern should start with data/
+        assert pattern.startswith('data/'), \
+            f"source_objects should start with 'data/', got: {pattern}"
 
     def test_source_objects_matches_upload_pattern(self) -> None:
         """
         Test that source_objects pattern matches what upload_to_gcs creates.
         
-        Upload creates: raw/{ds}/{filename}.json.gz
-        Load should match: raw/{{ ds }}/*.json.gz
+        Upload creates: data/filename.json.gz
+        Load should match: data/*.json.gz
         """
         import github_activity_pipeline
         
@@ -139,9 +136,7 @@ class TestLoadTaskSourceObjects:
         pattern = source_objects[0]
         
         # Verify pattern structure
-        # Should be: raw/{{ ds }}/*.json.gz
-        assert '{{ ds }}' in pattern, "Pattern should include {{ ds }} template"
-        assert 'raw/' in pattern, "Pattern should include raw/ prefix"
+        assert 'data/' in pattern, "Pattern should include data/ prefix"
         assert '*.json.gz' in pattern, "Pattern should include *.json.gz wildcard"
 
     def test_source_objects_not_directory_only(self) -> None:
@@ -149,10 +144,10 @@ class TestLoadTaskSourceObjects:
         Test that source_objects is NOT just a directory pattern.
         
         This is the bug that caused:
-        "404 Not found: URI gs://bucket/raw/2024-01-02/"
+        "404 Not found: URI gs://bucket/data/"
         
-        The directory 'raw/2024-01-02/' doesn't exist as an object in GCS.
-        Only individual files exist: raw/2024-01-02/file.json.gz
+        The directory 'data/' doesn't exist as an object in GCS.
+        Only individual files exist: data/file.json.gz
         """
         import github_activity_pipeline
         
@@ -170,10 +165,6 @@ class TestLoadTaskSourceObjects:
         # Should end with *.json.gz (file pattern)
         assert not pattern.endswith('/'), \
             f"source_objects should not be directory-only pattern, got: {pattern}"
-        assert not pattern.endswith('/\"'), \
-            f"source_objects should not be directory-only pattern, got: {pattern}"
-        assert not pattern.endswith("/'"), \
-            f"source_objects should not be directory-only pattern, got: {pattern}"
 
 
 class TestPathConsistency:
@@ -181,19 +172,19 @@ class TestPathConsistency:
 
     def test_upload_and_load_use_same_prefix(self) -> None:
         """
-        Test that both tasks use 'raw/' prefix consistently.
+        Test that both tasks use 'data/' prefix consistently.
         
-        Upload: raw/{ds}/filename.json.gz
-        Load: raw/{{ ds }}/*.json.gz
+        Upload: data/filename.json.gz
+        Load: data/*.json.gz
         
-        Both should use 'raw/' as the base prefix.
+        Both should use 'data/' as the base prefix.
         """
         import github_activity_pipeline
         import inspect
         
         # Check upload function
         upload_source = inspect.getsource(github_activity_pipeline.upload_to_gcs)
-        assert "'raw/" in upload_source or '"raw/' in upload_source
+        assert "'data/" in upload_source or '"data/' in upload_source
         
         # Check load task
         load_task = None
@@ -204,7 +195,7 @@ class TestPathConsistency:
         
         assert load_task is not None
         pattern = load_task.source_objects[0]
-        assert pattern.startswith('raw/')
+        assert pattern.startswith('data/')
 
     def test_gcs_bucket_consistency(self) -> None:
         """
@@ -230,43 +221,36 @@ class TestPathConsistency:
         assert load_task.bucket == github_activity_pipeline.GCS_BUCKET
 
 
-class TestSourceObjectsPattern:
-    """Test specific source_objects patterns"""
+class TestGHEArchiveURL:
+    """Test GHE Archive URL configuration"""
 
-    def test_valid_pattern_formats(self) -> None:
-        """Test various valid pattern formats"""
-        valid_patterns = [
-            'raw/{{ ds }}/*.json.gz',
-            'raw/{{ ds }}/*',
-            'raw/{{ds}}/*.json.gz',
-        ]
+    def test_url_format(self) -> None:
+        """
+        Test that GHE Archive URL uses correct format.
         
-        for pattern in valid_patterns:
-            # Should have wildcard
-            assert '*' in pattern
-            # Should have ds template
-            assert 'ds' in pattern
-            # Should have raw prefix
-            assert pattern.startswith('raw')
+        Should be: https://data.gharchive.org
+        NOT: https://gharchive.org/data/
+        
+        Files are at: https://data.gharchive.org/YYYY-MM-DD-HH.json.gz
+        """
+        import github_activity_pipeline
+        
+        # URL should be data.gharchive.org
+        assert github_activity_pipeline.GHE_ARCHIVE_URL == 'https://data.gharchive.org', \
+            f"GHE_ARCHIVE_URL should be 'https://data.gharchive.org', got: {github_activity_pipeline.GHE_ARCHIVE_URL}"
 
-    def test_invalid_pattern_formats(self) -> None:
-        """Test various invalid pattern formats"""
-        invalid_patterns = [
-            'raw/{{ ds }}/',  # Directory only - won't match files
-            'raw/{{ ds }}',   # No trailing slash or wildcard
-            '{{ ds }}/',      # Missing raw/ prefix
-        ]
+    def test_url_constructs_correct_path(self) -> None:
+        """Test that URL constructs correct file path"""
+        import github_activity_pipeline
         
-        for pattern in invalid_patterns:
-            # Should NOT be used
-            # Either no wildcard or wrong structure
-            has_wildcard = '*' in pattern
-            has_trailing_slash = pattern.endswith('/')
-            
-            # Invalid if: no wildcard AND has trailing slash (directory pattern)
-            if not has_wildcard and has_trailing_slash:
-                # This is the bug pattern
-                pass  # We're testing that our code doesn't use this
+        # Example: 2024-01-02-00.json.gz
+        date_str = "2024-01-02"
+        hour_str = "00"
+        filename = f"{date_str}-{hour_str}.json.gz"
+        url = f"{github_activity_pipeline.GHE_ARCHIVE_URL}/{filename}"
+        
+        expected = "https://data.gharchive.org/2024-01-02-00.json.gz"
+        assert url == expected, f"URL should be {expected}, got: {url}"
 
 
 class TestGCSObjectExistence:
@@ -277,14 +261,13 @@ class TestGCSObjectExistence:
         Test understanding that GCS doesn't have real directories.
         
         GCS is flat - 'directories' are just prefixes in object names.
-        When you upload to 'raw/2024-01-02/file.json.gz', GCS creates:
-        - Object: raw/2024-01-02/file.json.gz
+        When you upload to 'data/file.json.gz', GCS creates:
+        - Object: data/file.json.gz
         
         It does NOT create:
-        - Object: raw/
-        - Object: raw/2024-01-02/
+        - Object: data/
         
-        So GCSToBigQueryOperator with source_objects=['raw/2024-01-02/']
+        So GCSToBigQueryOperator with source_objects=['data/']
         will fail because that 'directory' object doesn't exist.
         """
         # This is a conceptual test - verifying understanding

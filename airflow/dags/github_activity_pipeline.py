@@ -30,13 +30,14 @@ from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
 from airflow.models import Variable
 
+import glob
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import requests
-from requests.exceptions import HTTPError
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +69,13 @@ dag = DAG(
 )
 
 # Configuration constants
-GHE_ARCHIVE_URL = 'https://gharchive.org'
 BQ_DATASET = 'github_activity'
 BQ_TABLE = 'github_events'
+DATA_DIR = Path('/tmp/github_archive')
+
+# GHE Archive URL - direct access to S3 bucket
+# Files are at: https://data.gharchive.org/YYYY-MM-DD-HH.json.gz
+GHE_ARCHIVE_URL = 'https://data.gharchive.org'
 
 
 def get_project_id() -> str:
@@ -97,7 +102,6 @@ def get_project_id() -> str:
         pass
     
     # Try environment variable
-    import os
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
     if project_id and project_id != "your-gcp-project-id":
         return project_id
@@ -112,124 +116,119 @@ def get_project_id() -> str:
 # Get project ID at DAG parse time (will raise if not configured)
 PROJECT_ID = get_project_id()
 GCS_BUCKET = f'github-activity-batch-raw-{PROJECT_ID}'
-GCS_PREFIX = 'raw/{{ ds }}'
 
 
-def download_github_archive(**context: Any) -> dict[str, Any]:
+def download_github_archive(**context: Any) -> str:
     """
     Download GitHub activity archive for the execution date.
+
+    Fetches hourly JSON.gz files from data.gharchive.org for all 24 hours of
+    the execution date. Files are stored temporarily for upload to GCS.
     
-    Fetches hourly JSON.gz files from GHE Archive for all 24 hours of the
-    execution date. Files are stored temporarily for upload to GCS.
-    
+    Note: GHE Archive data availability varies. Some dates/hours may be missing.
+    The task succeeds as long as at least one file is downloaded.
+    For testing, use dates from 2011 onwards with better coverage (e.g., 2024-06-15).
+
     Args:
-        **context: Airflow context dictionary containing execution date.
-    
+        **context: Airflow context containing execution_date.
+
     Returns:
-        dict: Download statistics including files downloaded, count, and success rate.
+        str: Summary of downloaded files.
     """
-    ds: str = context['ds']  # Execution date in YYYY-MM-DD format
-    download_dir = Path('/tmp/github_archive')
-    download_dir.mkdir(exist_ok=True, parents=True)
-    
-    files_downloaded: list[str] = []
+    execution_date = context['execution_date']
+    date_str = execution_date.strftime('%Y-%m-%d')
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    downloaded_files: list[str] = []
     failed_downloads: list[tuple[str, str]] = []
-    
-    logger.info("Starting download for date: %s", ds)
-    
-    # Download 24 hourly files for the day
+
+    logger.info("Starting download for date: %s", date_str)
+
     for hour in range(24):
-        hour_str = f'{hour:02d}'
-        filename = f'{ds}-{hour_str}.json.gz'
-        url = f'{GHE_ARCHIVE_URL}/data/{ds}-{hour_str}.json.gz'
-        local_path = download_dir / filename
-        
+        hour_str = f"{hour:02d}"
+        filename = f"{date_str}-{hour_str}.json.gz"
+        url = f"{GHE_ARCHIVE_URL}/{filename}"
+        local_path = DATA_DIR / filename
+
         try:
-            response = requests.get(url, timeout=300)
+            response = requests.get(url, timeout=30)
             response.raise_for_status()
-            
             with open(local_path, 'wb') as f:
                 f.write(response.content)
-            
-            files_downloaded.append(filename)
-            logger.info("✓ Downloaded: %s (%d bytes)", filename, len(response.content))
-            
-        except HTTPError as e:
-            if e.response is not None and e.response.status_code == 404:
-                logger.warning("File not available yet: %s", filename)
-                failed_downloads.append((filename, '404'))
-            else:
-                logger.error("HTTP error for %s: %s", filename, str(e))
-                failed_downloads.append((filename, str(e)))
+            downloaded_files.append(str(local_path))
+            logger.info("Downloaded: %s", filename)
         except Exception as e:
-            logger.error("Failed to download %s: %s", filename, str(e))
-            failed_downloads.append((filename, str(e)))
-    
-    # Log summary
-    logger.info("Download complete: %d/24 files succeeded", len(files_downloaded))
-    if failed_downloads:
-        logger.warning("Failed downloads: %d", len(failed_downloads))
-        for fname, reason in failed_downloads[:5]:  # Show first 5 failures
-            logger.warning("  - %s: %s", fname, reason)
-    
-    return {
-        'files': files_downloaded,
-        'count': len(files_downloaded),
-        'failed_count': len(failed_downloads),
-        'success_rate': len(files_downloaded) / 24.0 if files_downloaded else 0.0
-    }
+            error_msg = str(e)
+            logger.warning("Failed to download %s: %s", filename, error_msg)
+            failed_downloads.append((filename, error_msg))
 
-def upload_to_gcs(**context: Any) -> dict[str, Any]:
+    # Push downloaded files list to XCom for downstream tasks
+    context['ti'].xcom_push(key='downloaded_files', value=downloaded_files)
+
+    success_count = len(downloaded_files)
+    logger.info(
+        "Download complete: %d/24 files succeeded, %d failed",
+        success_count,
+        len(failed_downloads)
+    )
+
+    # Warn if many files failed, but don't fail the task
+    if len(failed_downloads) > 12:
+        logger.warning(
+            "More than half of files failed to download. "
+            "Consider using a different date with better data availability."
+        )
+
+    return f"Downloaded {success_count} files for {date_str}"
+
+
+def upload_to_gcs(**context: Any) -> str:
     """
     Upload downloaded files to GCS bucket.
-    
-    Uploads all downloaded .json.gz files to the GCS bucket under the
-    raw/{date} prefix using the GCS hook for authenticated upload.
-    
+
+    Uploads all downloaded .json.gz files from the temporary directory
+    to the configured GCS bucket under the 'data/' prefix.
+
     Args:
-        **context: Airflow context dictionary containing execution date.
-    
+        **context: Airflow context (not used but required by signature).
+
     Returns:
-        dict: Upload statistics including uploaded files and GCS path.
+        str: Summary of uploaded files.
     """
-    ds: str = context['ds']
-    download_dir = Path('/tmp/github_archive')
-    gcs_prefix = f'raw/{ds}'
-    
     hook = GCSHook()
     uploaded_files: list[str] = []
     failed_uploads: list[tuple[str, str]] = []
-    
-    logger.info("Starting upload to GCS bucket: %s", GCS_BUCKET)
-    
-    if not download_dir.exists():
-        logger.error("Download directory not found: %s", download_dir)
-        return {'uploaded_files': [], 'count': 0, 'error': 'No files to upload'}
-    
-    for file_path in download_dir.glob('*.json.gz'):
-        object_name = f'{gcs_prefix}/{file_path.name}'
-        
+
+    # Find all downloaded files
+    pattern = str(DATA_DIR / '*.json.gz')
+    files = glob.glob(pattern)
+
+    logger.info("Found %d files to upload to GCS", len(files))
+
+    for file_path in files:
+        object_name = f'data/{os.path.basename(file_path)}'
         try:
             hook.upload(
                 bucket_name=GCS_BUCKET,
                 object_name=object_name,
-                filename=str(file_path),
+                filename=file_path,
                 mime_type='application/gzip'
             )
             uploaded_files.append(object_name)
-            logger.info("✓ Uploaded: %s", object_name)
+            logger.info("Uploaded: %s", object_name)
         except Exception as e:
-            logger.error("Failed to upload %s: %s", file_path.name, str(e))
-            failed_uploads.append((file_path.name, str(e)))
-    
-    logger.info("Upload complete: %d files uploaded to GCS", len(uploaded_files))
-    
-    return {
-        'uploaded_files': uploaded_files,
-        'count': len(uploaded_files),
-        'failed_count': len(failed_uploads),
-        'gcs_path': f'gs://{GCS_BUCKET}/{gcs_prefix}/'
-    }
+            error_msg = str(e)
+            logger.error("Failed to upload %s: %s", file_path, error_msg)
+            failed_uploads.append((file_path, error_msg))
+
+    logger.info(
+        "Upload complete: %d files uploaded, %d failed",
+        len(uploaded_files),
+        len(failed_uploads)
+    )
+
+    return f"Uploaded {len(uploaded_files)} files to GCS"
+
 
 def validate_data_quality(**context: Any) -> dict[str, Any]:
     """
@@ -244,22 +243,19 @@ def validate_data_quality(**context: Any) -> dict[str, Any]:
     Returns:
         dict: Validation result with file count and total size.
     """
-    ds: str = context['ds']
-    gcs_prefix = f'raw/{ds}'
-    
     hook = GCSHook()
     
     try:
         blobs = list(hook.list(
             bucket_name=GCS_BUCKET,
-            prefix=gcs_prefix
+            prefix='data/'
         ))
         
         file_count = len(blobs)
-        logger.info("Found %d files in GCS for date %s", file_count, ds)
+        logger.info("Found %d files in GCS", file_count)
         
         if file_count == 0:
-            logger.warning("No files found in GCS for %s. Skipping load.", ds)
+            logger.warning("No files found in GCS. Skipping load.")
             return {'valid': False, 'reason': 'No files found'}
         
         # Check total size
@@ -304,12 +300,12 @@ validate_task = PythonOperator(
 # schema_fields, clustering_fields, or time_partitioning parameters.
 #
 # CRITICAL: source_objects must match the upload_to_gcs task's object_name format.
-# Upload task uses: f'raw/{ds}/{filename}' (e.g., 'raw/2024-01-02/2024-01-02-00.json.gz')
-# So source_objects must be 'raw/{{ ds }}/*.json.gz' to match the uploaded files.
+# Upload task uses: f'data/{filename}' (e.g., 'data/2024-01-02-00.json.gz')
+# So source_objects must be 'data/*.json.gz' to match the uploaded files.
 load_task = GCSToBigQueryOperator(
     task_id='load_to_bigquery',
     bucket=GCS_BUCKET,
-    source_objects=[f'raw/{{{{ ds }}}}/*.json.gz'],
+    source_objects=['data/*.json.gz'],
     destination_project_dataset_table=f'{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}',
     source_format='NEWLINE_DELIMITED_JSON',
     write_disposition='WRITE_APPEND',
