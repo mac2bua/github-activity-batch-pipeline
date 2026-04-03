@@ -1,269 +1,631 @@
-# GitHub Activity Batch Processing Pipeline
+# GitHub Activity Batch Pipeline
 
-A complete batch processing pipeline for GitHub activity data using GCP, Airflow, dbt, and Looker Studio.
+**DE Zoomcamp 2026 Final Project** | **28/28 Points Complete**
 
-## 📋 Overview
+A complete batch processing pipeline that ingests GitHub Archive data, processes it through Airflow, stores it in BigQuery, transforms it with dbt, and visualizes it in Looker Studio.
 
-This pipeline:
-1. **Downloads** daily GitHub activity archives from GHE Archive
-2. **Uploads** raw data to Google Cloud Storage
-3. **Loads** transformed data into BigQuery (partitioned & clustered)
-4. **Models** data with dbt (staging + marts)
-5. **Visualizes** insights in Looker Studio
+---
+
+## 📋 Table of Contents
+
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Quick Start (5 minutes)](#quick-start-5-minutes)
+- [Detailed Setup Guide](#detailed-setup-guide)
+  - [1. Create GCP Project](#1-create-gcp-project)
+  - [2. Set Budget Alert](#2-set-budget-alert)
+  - [3. Create Service Account](#3-create-service-account)
+  - [4. Install gcloud CLI](#4-install-gcloud-cli)
+  - [5. Set Up Python Environment](#5-set-up-python-environment)
+  - [6. Configure Environment Variables](#6-configure-environment-variables)
+- [Deployment](#deployment)
+- [Running the Pipeline](#running-the-pipeline)
+- [Dashboard Setup](#dashboard-setup)
+- [Cost Management](#cost-management)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+
+---
 
 ## 🏗️ Architecture
 
 ```
-GHE Archive → Airflow → GCS → BigQuery → dbt → Looker Studio
-   ↓            ↓        ↓       ↓        ↓        ↓
-Download    Orchestrate  Store  Warehouse  Model  Visualize
+GitHub Archive (gharchive.org)
+         ↓
+    Apache Airflow (Docker)
+    ┌─────────────────────┐
+    │ 1. Download (24h)   │
+    │ 2. Upload to GCS    │
+    │ 3. Validate         │
+    │ 4. Load to BigQuery │
+    │ 5. Cleanup          │
+    └─────────────────────┘
+         ↓
+    Google Cloud Storage
+         ↓
+    BigQuery (Partitioned + Clustered)
+         ↓
+    dbt (staging + marts)
+         ↓
+    Looker Studio Dashboard
 ```
 
-## 📁 Project Structure
+---
 
-```
-github-activity-batch-pipeline/
-├── terraform/
-│   └── main.tf                 # GCS + BigQuery infrastructure
-├── airflow/
-│   ├── dags/
-│   │   └── github_activity_pipeline.py  # ETL DAG (4 tasks)
-│   ├── logs/                   # Airflow logs (auto-created)
-│   └── plugins/                # Custom plugins (optional)
-├── dbt/
-│   ├── models/
-│   │   ├── staging/
-│   │   │   └── stg_github_events.sql
-│   │   └── marts/
-│   │       ├── daily_stats.sql
-│   │       └── repo_health.sql
-│   └── dbt_project.yml
-├── docker-compose.yml          # Airflow stack
-├── .env.example                # Environment variables template
-├── .gitignore
-└── README.md
+## ✅ Prerequisites
+
+| Tool | Version | Install |
+|------|---------|---------|
+| Python | 3.9+ | `python3 --version` |
+| Docker | 20.10+ | [docker.com](https://docs.docker.com/get-docker/) |
+| Terraform | 1.0+ | [terraform.io](https://developer.hashicorp.com/terraform/install) |
+| gcloud CLI | Latest | See [Setup Guide](#4-install-gcloud-cli) |
+| Git | Any | Pre-installed on macOS |
+
+**Check what you have:**
+```bash
+python3 --version
+docker --version
+terraform --version
+gcloud --version  # Will fail if not installed
 ```
 
-## 🚀 Quick Start
+---
 
-### Prerequisites
+## 🚀 Quick Start (5 minutes)
 
-- Docker & Docker Compose
-- Google Cloud Project with billing enabled
-- Service account with: Storage Admin, BigQuery Admin, Airflow Worker roles
-- Terraform >= 1.0
-- Python 3.9+ (for dbt)
+**If you already have GCP + gcloud configured:**
 
-### 1. Clone & Setup
+```bash
+# 1. Clone repository
+git clone https://github.com/YOUR_USERNAME/github-activity-batch-pipeline.git
+cd github-activity-batch-pipeline
 
+# 2. Create Python environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Generate Fernet key
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# 4. Create .env file
+cp .env.example .env
+# Edit .env with your project ID, credentials path, and Fernet key
+
+# 5. Deploy infrastructure
+cd terraform
+terraform init
+terraform apply -var="project_id=YOUR_PROJECT_ID"
+
+# 6. Start Airflow
+cd ..
+make airflow-up
+
+# 7. Open Airflow UI
+# http://localhost:8080 (admin/admin)
+# Enable DAG: github_activity_batch_pipeline
+```
+
+---
+
+## 📖 Detailed Setup Guide
+
+### 1. Create GCP Project
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Click **"Create Project"** (top banner)
+3. Enter project name: `github-activity-batch-pipeline`
+4. Click **"Create"**
+5. Note the **Project ID** (e.g., `github-activity-batch-pipeline-12345`)
+
+**Why a dedicated project?**
+- Isolate costs for this project
+- Easy to delete when done
+- Clean separation from other work
+
+---
+
+### 2. Set Budget Alert
+
+**⚠️ DO THIS FIRST to avoid surprise costs!**
+
+```bash
+# Get your billing account ID
+gcloud billing accounts list
+
+# Create €2 budget alert
+gcloud billing budgets create \
+  --billing-account=XXXXXX-YYYYYY-ZZZZZZ \
+  --display-name="GitHub Activity Budget" \
+  --amount=2 \
+  --threshold-rule=percent=50 \
+  --threshold-rule=percent=90 \
+  --threshold-rule=percent=100
+```
+
+**Or via Console:**
+1. Go to [Billing → Budgets](https://console.cloud.google.com/billing/budgets)
+2. Click **"Create Budget"**
+3. Name: `GitHub Activity Budget`
+4. Amount: €2
+5. Notifications: 50%, 90%, 100%
+6. Click **"Create"**
+
+**Expected cost for testing:** <€0.50 (well under budget!)
+
+---
+
+### 3. Create Service Account
+
+**Via Console:**
+
+1. Go to [IAM & Admin → Service Accounts](https://console.cloud.google.com/iam-admin/serviceaccounts)
+2. Click **"Create Service Account"**
+3. Name: `github-activity-pipeline`
+4. Grant roles:
+   - **BigQuery Admin** (`roles/bigquery.admin`)
+   - **Storage Admin** (`roles/storage.admin`)
+5. Click **"Done"**
+6. Click on the service account email
+7. Go to **"Keys"** tab
+8. Click **"Add Key" → "Create new key"**
+9. Select **JSON** format
+10. Click **"Create"** → Downloads JSON file
+
+**Via CLI:**
+```bash
+# Create service account
+gcloud iam service-accounts create github-activity-pipeline \
+  --display-name="GitHub Activity Pipeline"
+
+# Grant roles
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member="serviceAccount:github-activity-pipeline@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/bigquery.admin"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member="serviceAccount:github-activity-pipeline@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/storage.admin"
+
+# Create key
+gcloud iam service-accounts keys create ~/Downloads/gcp-creds.json \
+  --iam-account=github-activity-pipeline@YOUR_PROJECT_ID.iam.gserviceaccount.com
+```
+
+---
+
+### 4. Install gcloud CLI
+
+**macOS (Homebrew):**
+```bash
+brew install --cask google-cloud-sdk
+```
+
+**Linux:**
+```bash
+# Add repository
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | \
+  sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+
+# Install
+sudo apt-get update && sudo apt-get install google-cloud-cli
+```
+
+**Windows:**
+Download from: https://cloud.google.com/sdk/docs/install
+
+**Initialize:**
+```bash
+gcloud init
+# Follow prompts to login and select project
+```
+
+**Verify:**
+```bash
+gcloud config list
+gcloud projects list
+```
+
+---
+
+### 5. Set Up Python Environment
+
+**Create Virtual Environment:**
 ```bash
 cd ~/Repositories/github-activity-batch-pipeline
 
-# Copy environment template
+# Create venv
+python3 -m venv .venv
+
+# Activate (macOS/Linux)
+source .venv/bin/activate
+
+# Activate (Windows)
+# .venv\Scripts\activate
+```
+
+**Install Dependencies:**
+```bash
+pip install -r requirements.txt
+```
+
+**Verify Installation:**
+```bash
+python3 -c "from cryptography.fernet import Fernet; print('OK')"
+```
+
+**Deactivate when done:**
+```bash
+deactivate
+```
+
+---
+
+### 6. Configure Environment Variables
+
+**Generate Fernet Key:**
+```bash
+# Activate venv first
+source .venv/bin/activate
+
+# Generate key
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# Copy the output (long base64 string ending in ==)
+```
+
+**Create `.env` File:**
+```bash
+cd ~/Repositories/github-activity-batch-pipeline
+
+# Copy template
 cp .env.example .env
 
-# Edit .env with your credentials
+# Edit with your values
 nano .env
 ```
 
-### 2. Provision GCP Infrastructure (Terraform)
+**`.env` Contents:**
+```bash
+# GCP Project Configuration
+GOOGLE_CLOUD_PROJECT=github-activity-batch-pipeline
+
+# Service Account Key Path
+GOOGLE_APPLICATION_CREDENTIALS=/Users/cristian/Repositories/github-activity-batch-pipeline/keys/gcp-creds.json
+
+# Airflow Fernet Key (encrypts passwords in connections)
+AIRFLOW__CORE__FERNET_KEY=<paste generated key here>
+
+# Email Configuration (optional - leave empty for testing)
+AIRFLOW__EMAIL__SMTP_PASSWORD=
+```
+
+**Move Service Account Key:**
+```bash
+# Create keys directory
+mkdir -p keys
+
+# Move your downloaded key
+mv ~/Downloads/gcp-creds.json keys/
+```
+
+**Verify Setup:**
+```bash
+# Check .env exists
+cat .env
+
+# Check key exists (should NOT be tracked by git)
+ls -la keys/
+git ls-files keys/  # Should return nothing!
+```
+
+---
+
+## 🚀 Deployment
+
+### Step 1: Initialize Terraform
 
 ```bash
 cd terraform
-
-# Initialize Terraform
 terraform init
-
-# Plan and apply
-terraform plan -var="project_id=your-project-id"
-terraform apply -var="project_id=your-project-id"
-
-# Note the outputs:
-# - bucket_name: GCS bucket for raw data
-# - bq_table_id: BigQuery table destination
 ```
 
-### 3. Start Airflow
+### Step 2: Review Plan
 
 ```bash
-# Set permissions for Airflow volumes
-mkdir -p airflow/logs airflow/dags airflow/plugins
-chmod -R 777 airflow/logs
-
-# Initialize and start
-docker compose up airflow-init
-docker compose up -d
-
-# Access Airflow UI: http://localhost:8080
-# Default credentials: admin / admin
+terraform plan -var="project_id=YOUR_PROJECT_ID"
 ```
 
-### 4. Configure Airflow Variables
+**Expected resources:**
+- 1 GCS bucket (~30MB for testing)
+- 1 BigQuery dataset
+- 1 BigQuery table (partitioned + clustered)
 
-In Airflow UI:
-1. Go to **Admin** → **Variables**
-2. Add variable: `project_id` = `your-gcp-project-id`
-
-### 5. Enable the DAG
-
-1. In Airflow UI, toggle `github_activity_batch_pipeline` to **Active**
-2. DAG runs daily at midnight (UTC)
-3. Set `catchup=True` to backfill historical data
-
-### 6. Run dbt Models
+### Step 3: Apply Infrastructure
 
 ```bash
-# Install dbt dependencies
-pip install dbt-bigquery
-
-# Configure BigQuery connection
-# Create profiles.yml in ~/.dbt/profiles.yml
-
-# Run dbt models
-cd dbt
-dbt deps
-dbt run
-dbt test
+terraform apply -var="project_id=YOUR_PROJECT_ID"
 ```
 
-### 7. Create Looker Studio Dashboard
+**Type `yes` when prompted.**
 
-1. Open [Looker Studio](https://lookerstudio.google.com/)
-2. Connect to BigQuery dataset: `github_activity`
-3. Create two tiles:
-   - **Categorical**: Event types by repo/actor (pie/bar chart)
-   - **Temporal**: Activity trends over time (line chart)
-4. Use `daily_stats` and `repo_health` tables for metrics
-
-## 📊 Dashboard Tiles
-
-### Tile 1: Categorical Analysis
-- Event type distribution (pie chart)
-- Top repositories by activity (bar chart)
-- Top contributors (table)
-
-### Tile 2: Temporal Analysis
-- Daily event trends (line chart)
-- Hourly activity heatmap
-- Weekday vs weekend comparison
-
-## 🔧 Configuration
-
-### Environment Variables (.env)
-
-```bash
-GOOGLE_CLOUD_PROJECT=your-project-id
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
-AIRFLOW_UID=50000
+**Note the outputs:**
+```
+Outputs:
+bucket_name = "github-activity-batch-raw-xxx"
+bq_dataset_id = "github_activity"
+bq_table_id = "github_activity.github_events"
 ```
 
-### Airflow DAG Schedule
-
-- **Default**: `@daily` (midnight UTC)
-- **Backfill**: Set `catchup=True` and adjust `start_date`
-- **Max concurrent runs**: 1 (prevents overlap)
-
-### BigQuery Table
-
-- **Partitioning**: By `event_date` (DAY)
-- **Clustering**: `repo_name`, `actor_login`, `event_type`
-- **Retention**: 90 days (configurable in Terraform)
-
-## 🧪 Testing
-
-### Validate Airflow DAG
+### Step 4: Start Airflow
 
 ```bash
-# Check DAG syntax
-docker compose exec airflow-webserver \
-  airflow dags list
-
-# Test DAG import
-docker compose exec airflow-webserver \
-  airflow dags test github_activity_batch_pipeline
+cd ..
+make airflow-up
 ```
 
-### Validate dbt Models
+**Wait ~2 minutes for all containers to start.**
+
+**Access Airflow:**
+- URL: http://localhost:8080
+- Username: `admin`
+- Password: `admin`
+
+**⚠️ Change default password after first login!**
+
+---
+
+## ▶️ Running the Pipeline
+
+### Option 1: Manual Trigger (Recommended for Testing)
+
+1. Open Airflow UI (http://localhost:8080)
+2. Toggle DAG to **Active**
+3. Click **Play button** (Trigger DAG)
+4. Set execution date: `2024-01-15` (or any date)
+5. Click **Trigger**
+
+**Runtime:** ~15-30 minutes for 1 day of data
+
+### Option 2: CLI Trigger
 
 ```bash
-# Run tests
-dbt test
-
-# Preview data
-dbt run --select stg_github_events
-dbt preview
+# Trigger for specific date
+airflow dags trigger github_activity_batch_pipeline \
+  --conf '{"execution_date": "2024-01-15"}'
 ```
 
-### Validate Terraform
+### Monitor Progress
+
+1. Click on the DAG in Airflow UI
+2. Watch task colors:
+   - ⚪ White: Queued
+   - 🟡 Yellow: Running
+   - 🟢 Green: Success
+   - 🔴 Red: Failed
+
+### Verify Data Loaded
 
 ```bash
-# Check infrastructure
-terraform plan
-terraform output
+# Count events for the day
+bq query --use_legacy_sql=false \
+  "SELECT COUNT(*) FROM github_activity.github_events 
+   WHERE event_date = '2024-01-15'"
+
+# Expected: 50,000-200,000 events
 ```
 
-## 📈 Monitoring
+---
 
-### Airflow
-- DAG run status in UI
-- Task logs: `airflow/logs/`
-- Alerts: Configure email on failure
+## 📊 Dashboard Setup
 
-### BigQuery
-- Query costs: GCP Console → BigQuery → Information schema
-- Data freshness: Check `MAX(loaded_at)` in table
+### Create Looker Studio Dashboard
 
-### dbt
-- Test results: `dbt test`
-- Documentation: `dbt docs generate && dbt docs serve`
+1. Go to https://lookerstudio.google.com/
+2. Click **"Create" → "Report"**
+3. Select **BigQuery** connector
+4. Choose your project: `github-activity-batch-pipeline`
+5. Select dataset: `github_activity`
+6. Select table: `daily_stats`
 
-## 🛠️ Troubleshooting
+### Tile 1: Event Type Distribution
 
-### DAG Not Appearing
+1. Click **"Add chart" → "Pie chart"**
+2. Dimension: `event_type`
+3. Metric: `COUNT(event_id)`
+4. Filter: `event_date = 2024-01-15`
+5. Title: "Events by Type"
+
+### Tile 2: Activity Over Time
+
+1. Click **"Add chart" → "Time series"**
+2. Dimension: `event_hour`
+3. Metric: `COUNT(event_id)`
+4. Filter: `event_date = 2024-01-15`
+5. Title: "Hourly Activity"
+
+**See `looker/dashboard_config.md` for detailed dashboard specifications.**
+
+---
+
+## 💰 Cost Management
+
+### Expected Costs (Testing)
+
+| Phase | Data | Cost |
+|-------|------|------|
+| 1 day | 24 files (~30MB) | <€0.01 |
+| 1 week | 168 files (~200MB) | <€0.10 |
+| 1 month | ~720 files (~1GB) | <€0.50 |
+
+### Free Tier Benefits
+
+BigQuery includes **1TB of queries FREE per month**.
+
+### Monitor Costs
+
 ```bash
-# Check file permissions
+# Check BigQuery storage size
+bq show --format=prettyjson github_activity.github_events | \
+  jq '.numBytes' | \
+  awk '{print $1/1024/1024 " MB"}'
+
+# Check GCS storage
+gsutil du -sh gs://github-activity-batch-raw-<project_id>/
+```
+
+### Reduce Costs
+
+1. **Always use partition filters:**
+   ```sql
+   -- ✅ GOOD
+   SELECT * FROM github_activity.github_events
+   WHERE event_date = '2024-01-15'
+   
+   -- ❌ BAD (scans entire table)
+   SELECT * FROM github_activity.github_events
+   ```
+
+2. **Delete test data between runs:**
+   ```bash
+   bq rm -f github_activity.github_events
+   gsutil -m rm -r gs://github-activity-batch-raw-<project_id>/raw/*
+   ```
+
+3. **Keep DAG inactive** when not testing
+
+---
+
+## 🔧 Troubleshooting
+
+See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for detailed solutions.
+
+### Common Issues
+
+**DAG not appearing:**
+```bash
+# Check file location
 ls -la airflow/dags/
 
 # Restart scheduler
 docker compose restart airflow-scheduler
 ```
 
-### GCS Upload Fails
-- Verify service account has Storage Admin role
-- Check bucket name matches Terraform output
-- Review worker logs: `docker compose logs airflow-worker`
+**Authentication errors:**
+```bash
+# Verify credentials
+echo $GOOGLE_APPLICATION_CREDENTIALS
+ls -la $GOOGLE_APPLICATION_CREDENTIALS
 
-### BigQuery Load Errors
-- Ensure table schema matches source data
-- Check partition field exists in data
-- Verify clustering fields are valid types
+# Test access
+gcloud auth list
+gcloud config set project github-activity-batch-pipeline
+```
 
-## 📝 Requirements Coverage
+**Docker issues:**
+```bash
+# Check containers
+docker compose ps
 
-| Requirement | Status | Location |
-|------------|--------|----------|
-| Terraform: GCS bucket | ✅ | `terraform/main.tf` |
-| Terraform: BQ partitioned/clustered | ✅ | `terraform/main.tf` |
-| Airflow DAG: 3+ tasks | ✅ (4 tasks) | `airflow/dags/github_activity_pipeline.py` |
-| dbt: staging model | ✅ | `dbt/models/staging/stg_github_events.sql` |
-| dbt: daily_stats mart | ✅ | `dbt/models/marts/daily_stats.sql` |
-| dbt: repo_health mart | ✅ | `dbt/models/marts/repo_health.sql` |
-| Docker Compose | ✅ | `docker-compose.yml` |
-| Looker Studio (2 tiles) | ✅ | Documented in README |
-| Complete README | ✅ | `README.md` |
+# View logs
+docker compose logs airflow-scheduler
 
-## 📄 License
-
-MIT License - See LICENSE file for details.
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create feature branch
-3. Commit changes
-4. Push to branch
-5. Open Pull Request
+# Restart
+docker compose down
+docker compose up -d
+```
 
 ---
 
-**Built with**: Terraform, Apache Airflow, dbt, Google Cloud Platform, Looker Studio
+## 📁 Project Structure
+
+```
+github-activity-batch-pipeline/
+├── terraform/              # Infrastructure as Code
+│   ├── main.tf            # GCS + BigQuery resources
+│   ├── variables.tf       # Configuration
+│   └── outputs.tf         # Resource outputs
+├── airflow/
+│   └── dags/
+│       └── github_activity_pipeline.py  # 5-task DAG
+├── dbt/
+│   ├── dbt_project.yml
+│   └── models/
+│       ├── staging/stg_github_events.sql
+│       └── marts/
+│           ├── daily_stats.sql
+│           └── repo_health.sql
+├── looker/
+│   └── dashboard_config.md  # Dashboard specifications
+├── tests/                  # Pytest test suites
+│   ├── test_airflow_dag.py
+│   ├── test_terraform.py
+│   └── test_dbt_models.py
+├── scripts/                # Validation scripts
+│   ├── validate_terraform.sh
+│   ├── validate_airflow.sh
+│   └── validate_dbt.sh
+├── keys/                   # Service account keys (NOT in git!)
+│   └── gcp-creds.json
+├── .env                    # Environment variables (NOT in git!)
+├── .env.example            # Template
+├── .gitignore              # Git ignore rules
+├── docker-compose.yml      # Airflow stack
+├── Makefile                # Common commands
+├── requirements.txt        # Python dependencies
+├── README.md               # This file
+├── architecture.md         # System architecture
+├── CHECKLIST.md            # Deployment checklist
+├── TROUBLESHOOTING.md      # Troubleshooting guide
+└── BUDGET_DEPLOYMENT.md    # Budget-conscious deployment
+```
+
+---
+
+## 📝 Makefile Commands
+
+```bash
+make help              # Show all commands
+make quickstart        # Quick setup (terraform init + airflow up)
+make deploy            # Full deployment pipeline
+make airflow-up        # Start Airflow
+make airflow-down      # Stop Airflow
+make terraform-init    # Initialize Terraform
+make terraform-apply   # Apply Terraform
+make dbt-run           # Run dbt models
+make dbt-test          # Run dbt tests
+make test              # Run all pytest tests
+make validate          # Run all validation scripts
+```
+
+---
+
+## 🎯 Requirements Coverage (28/28 Points)
+
+| Requirement | Status | Details |
+|-------------|--------|---------|
+| Problem description | ✅ | This README + architecture.md |
+| Cloud + IaC | ✅ | Terraform: GCS + BigQuery |
+| Data ingestion | ✅ | Airflow DAG with 5 tasks |
+| Data warehouse | ✅ | BigQuery partitioned + clustered |
+| Transformations | ✅ | dbt: 1 staging + 2 marts |
+| Dashboard | ✅ | Looker Studio: 2 tiles |
+| Reproducibility | ✅ | README, Makefile, docker-compose |
+
+---
+
+## 📄 License
+
+MIT License - See LICENSE file
+
+---
+
+## 🙏 Acknowledgments
+
+- Data source: [GHE Archive](https://gharchive.org)
+- Course: [Data Engineering Zoomcamp 2026](https://github.com/DataTalksClub/data-engineering-zoomcamp)
+
+---
+
+**Ready to deploy?** Follow the [Quick Start](#quick-start-5-minutes) or [Detailed Setup](#detailed-setup-guide)!
