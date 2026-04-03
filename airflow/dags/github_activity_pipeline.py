@@ -33,6 +33,7 @@ from airflow.models import Variable
 import glob
 import logging
 import os
+import io
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -295,20 +296,26 @@ def validate_data_quality(**context: Any) -> dict[str, Any]:
     hook = GCSHook()
     
     try:
-        blobs = list(hook.list(
+        # hook.list() returns blob names (strings), need to get metadata for each
+        blob_names = list(hook.list(
             bucket_name=GCS_BUCKET,
             prefix='data/'
         ))
         
-        file_count = len(blobs)
+        file_count = len(blob_names)
         logger.info("Found %d files in GCS", file_count)
         
         if file_count == 0:
             logger.warning("No files found in GCS. Skipping load.")
             return {'valid': False, 'reason': 'No files found'}
         
-        # Check total size
-        total_size = sum(blob.size for blob in blobs if blob.size is not None)
+        # Get blob metadata to access size
+        total_size = 0
+        for blob_name in blob_names:
+            blob = hook.get_blob(bucket_name=GCS_BUCKET, blob_name=blob_name)
+            if blob and blob.size is not None:
+                total_size += blob.size
+        
         logger.info("Total data size: %.2f MB", total_size / (1024 * 1024))
         
         return {
@@ -320,6 +327,126 @@ def validate_data_quality(**context: Any) -> dict[str, Any]:
     except Exception as e:
         logger.error("Validation failed: %s", str(e))
         return {'valid': False, 'reason': str(e)}
+
+
+def transform_ghe_to_schema(**context: Any) -> str:
+    """
+    Transform GHE Archive data to match our BigQuery schema.
+    
+    GHE Archive format:
+    {
+      "id": "39324579438",
+      "type": "CreateEvent",
+      "actor": {"id": 101632126, "login": "user", ...},
+      "repo": {"id": 815527809, "name": "owner/repo", ...},
+      "payload": {...},
+      "public": true,
+      "created_at": "2024-06-15T12:00:00Z"
+    }
+    
+    Target schema:
+    - event_id (STRING): id
+    - event_type (STRING): type
+    - actor_login (STRING): actor.login
+    - repo_name (STRING): repo.name
+    - repo_owner (STRING): extracted from repo.name (owner part)
+    - created_at (TIMESTAMP): created_at
+    - event_date (DATE): extracted from created_at
+    - payload (JSON): original payload
+    - public (BOOLEAN): public
+    - loaded_at (TIMESTAMP): current timestamp
+    
+    Downloads files from GCS, transforms them, uploads transformed version
+    to GCS under 'transformed/' prefix.
+    
+    Args:
+        **context: Airflow context.
+    
+    Returns:
+        str: Summary of transformed files.
+    """
+    import json
+    from datetime import datetime, timezone
+    import gzip
+    import tempfile
+    
+    hook = GCSHook()
+    
+    # List source files
+    blob_names = list(hook.list(
+        bucket_name=GCS_BUCKET,
+        prefix='data/'
+    ))
+    
+    if not blob_names:
+        logger.warning("No source files found in GCS")
+        return "No files to transform"
+    
+    transformed_files = []
+    
+    for blob_name in blob_names:
+        logger.info("Transforming: %s", blob_name)
+        
+        # Download source file
+        source_data = hook.download(bucket_name=GCS_BUCKET, object_name=blob_name)
+        
+        # Create temp file for transformed output
+        output_filename = blob_name.replace('data/', 'transformed/')
+        
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.json.gz', delete=False) as tmp:
+            tmp_path = tmp.name
+            
+            # Decompress and transform
+            with gzip.open(io.BytesIO(source_data), 'rt', encoding='utf-8') as f:
+                with gzip.open(tmp_path, 'wt', encoding='utf-8') as out:
+                    for line in f:
+                        try:
+                            event = json.loads(line.strip())
+                            
+                            # Extract repo owner from repo.name (e.g., "owner/repo" -> "owner")
+                            repo_name = event.get('repo', {}).get('name', '')
+                            repo_owner = repo_name.split('/')[0] if '/' in repo_name else ''
+                            
+                            # Parse created_at and extract date
+                            created_at_str = event.get('created_at', '')
+                            event_date = created_at_str.split('T')[0] if created_at_str else ''
+                            
+                            # Transform to target schema
+                            transformed = {
+                                'event_id': event.get('id', ''),
+                                'event_type': event.get('type', ''),
+                                'actor_login': event.get('actor', {}).get('login', ''),
+                                'repo_name': repo_name,
+                                'repo_owner': repo_owner,
+                                'created_at': created_at_str,
+                                'event_date': event_date,
+                                'payload': event.get('payload', {}),
+                                'public': event.get('public', False),
+                                'loaded_at': datetime.now(timezone.utc).isoformat()
+                            }
+                            
+                            out.write(json.dumps(transformed) + '\n')
+                        except json.JSONDecodeError as e:
+                            logger.warning("Invalid JSON line: %s", e)
+                            continue
+            
+            # Upload transformed file
+            with open(tmp_path, 'rb') as f:
+                hook.upload(
+                    bucket_name=GCS_BUCKET,
+                    object_name=output_filename,
+                    file_data=f.read(),
+                    mime_type='application/gzip'
+                )
+            
+            transformed_files.append(output_filename)
+            logger.info("Uploaded transformed: %s", output_filename)
+            
+            # Cleanup temp file
+            os.unlink(tmp_path)
+    
+    logger.info("Transformed %d files", len(transformed_files))
+    return f"Transformed {len(transformed_files)} files"
 
 
 # Task 1: Download GitHub archive
@@ -343,18 +470,24 @@ validate_task = PythonOperator(
     dag=dag,
 )
 
+# Task 3b: Transform data to match schema
+transform_task = PythonOperator(
+    task_id='transform_data',
+    python_callable=transform_ghe_to_schema,
+    dag=dag,
+)
+
 # Task 4: Load to BigQuery
 # Note: Table schema, partitioning, and clustering are pre-created via Terraform.
 # GCSToBigQueryOperator in Airflow 2.8+ Google provider 10.x does not accept
 # schema_fields, clustering_fields, or time_partitioning parameters.
 #
-# CRITICAL: source_objects must match the upload_to_gcs task's object_name format.
-# Upload task uses: f'data/{filename}' (e.g., 'data/2024-01-02-00.json.gz')
-# So source_objects must be 'data/*.json.gz' to match the uploaded files.
+# CRITICAL: source_objects must match the transform_data task's output.
+# Transform task outputs: 'transformed/*.json.gz'
 load_task = GCSToBigQueryOperator(
     task_id='load_to_bigquery',
     bucket=GCS_BUCKET,
-    source_objects=['data/*.json.gz'],
+    source_objects=['transformed/*.json.gz'],
     destination_project_dataset_table=f'{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}',
     source_format='NEWLINE_DELIMITED_JSON',
     write_disposition='WRITE_APPEND',
@@ -371,4 +504,4 @@ cleanup_task = BashOperator(
 )
 
 # Define task dependencies
-download_task >> upload_task >> validate_task >> load_task >> cleanup_task
+download_task >> upload_task >> validate_task >> transform_task >> load_task >> cleanup_task
