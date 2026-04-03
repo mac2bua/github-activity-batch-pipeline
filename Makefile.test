@@ -1,0 +1,12 @@
+.PHONY: test test-unit test-dag
+
+# Run all tests
+test: test-unit test-dag
+
+# Run unit tests for pipeline tasks
+test-unit:
+	python3 -m pytest tests/test_pipeline_tasks.py -v
+
+# Run DAG integrity tests
+test-dag:
+	python3 scripts/test_dag_integrity.py
