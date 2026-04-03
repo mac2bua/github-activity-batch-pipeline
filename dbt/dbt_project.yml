@@ -1,14 +1,62 @@
+# dbt Project Configuration
+# GitHub Activity Batch Pipeline
+
 name: 'github_activity'
 version: '1.0.0'
 config-version: 2
+
 profile: 'github_activity'
+
 model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
 target-path: "target"
-clean-targets: ["target", "dbt_packages"]
+clean-targets:
+  - "target"
+  - "dbt_packages"
 
 models:
   github_activity:
     staging:
       +materialized: view
+      +tags: ['staging']
     marts:
       +materialized: table
+      +tags: ['mart']
+      daily_stats:
+        +partition_by:
+          field: stats_date
+          data_type: date
+          granularity: day
+        +cluster_by: ['event_type']
+      repo_health:
+        +partition_by:
+          field: snapshot_date
+          data_type: date
+          granularity: day
+        +cluster_by: ['repo_owner', 'repo_name']
+
+sources:
+  github_activity:
+    database: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"
+    schema: "github_activity"
+    tables:
+      - name: github_events
+        description: "Raw GitHub events from Airflow pipeline"
+        columns:
+          - name: event_id
+            description: "Unique event identifier"
+          - name: event_type
+            description: "Type of GitHub event"
+          - name: actor_login
+            description: "GitHub user login"
+          - name: repo_name
+            description: "Full repository name"
+          - name: created_at
+            description: "Event timestamp"
+          - name: event_date
+            description: "Partition date"

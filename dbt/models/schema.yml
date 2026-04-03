@@ -1,0 +1,110 @@
+version: 2
+
+models:
+  - name: stg_github_events
+    description: "Staged GitHub events with cleaned and normalized fields"
+    columns:
+      - name: event_id
+        description: "Unique identifier for the event"
+        tests:
+          - unique
+          - not_null
+      - name: event_type
+        description: "Type of GitHub event (e.g., PushEvent, PullRequestEvent)"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['PushEvent', 'PullRequestEvent', 'IssueCommentEvent', 'WatchEvent', 'ForkEvent', 'CreateEvent', 'DeleteEvent']
+      - name: actor_login
+        description: "GitHub username of the actor"
+        tests:
+          - not_null
+      - name: repo_name
+        description: "Full repository name (owner/repo)"
+        tests:
+          - not_null
+      - name: created_at
+        description: "Timestamp when the event occurred"
+        tests:
+          - not_null
+      - name: event_date
+        description: "Date partition (derived from created_at)"
+        tests:
+          - not_null
+      - name: is_valid_event
+        description: "Data quality flag indicating valid event"
+        tests:
+          - accepted_values:
+              values: [true]
+
+  - name: daily_stats
+    description: "Daily aggregated statistics for GitHub activity"
+    columns:
+      - name: stats_date
+        description: "Date of the statistics"
+        tests:
+          - unique
+          - not_null
+      - name: event_type
+        description: "Type of event for this aggregation"
+        tests:
+          - not_null
+      - name: total_events
+        description: "Total number of events"
+        tests:
+          - not_null
+      - name: unique_actors
+        description: "Count of unique actors"
+        tests:
+          - not_null
+      - name: unique_repos
+        description: "Count of unique repositories"
+      - name: business_hours_ratio
+        description: "Percentage of events during business hours (9-17)"
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 1
+      - name: weekend_ratio
+        description: "Percentage of events on weekends"
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 1
+
+  - name: repo_health
+    description: "Repository health metrics and scores"
+    columns:
+      - name: snapshot_date
+        description: "Date of the health snapshot"
+        tests:
+          - not_null
+      - name: repo_owner
+        description: "Repository owner (organization or user)"
+        tests:
+          - not_null
+      - name: repo_name
+        description: "Repository name"
+        tests:
+          - not_null
+      - name: repo_full_name
+        description: "Full repository name (owner/repo)"
+        tests:
+          - unique
+      - name: total_events
+        description: "Total events for this repository on this date"
+      - name: push_events
+        description: "Count of push events"
+      - name: pr_events
+        description: "Count of pull request events"
+      - name: overall_health_score
+        description: "Calculated health score (0-100)"
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100
+      - name: health_status
+        description: "Health classification (Healthy, Moderate, At Risk, Critical)"
+        tests:
+          - accepted_values:
+              values: ['Healthy', 'Moderate', 'At Risk', 'Critical']
