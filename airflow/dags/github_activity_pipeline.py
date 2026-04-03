@@ -302,10 +302,14 @@ validate_task = PythonOperator(
 # Note: Table schema, partitioning, and clustering are pre-created via Terraform.
 # GCSToBigQueryOperator in Airflow 2.8+ Google provider 10.x does not accept
 # schema_fields, clustering_fields, or time_partitioning parameters.
+#
+# CRITICAL: source_objects must match the upload_to_gcs task's object_name format.
+# Upload task uses: f'raw/{ds}/{filename}' (e.g., 'raw/2024-01-02/2024-01-02-00.json.gz')
+# So source_objects must be 'raw/{{ ds }}/*.json.gz' to match the uploaded files.
 load_task = GCSToBigQueryOperator(
     task_id='load_to_bigquery',
     bucket=GCS_BUCKET,
-    source_objects=[f'raw/{{{{ ds }}}}/'],
+    source_objects=[f'raw/{{{{ ds }}}}/*.json.gz'],
     destination_project_dataset_table=f'{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}',
     source_format='NEWLINE_DELIMITED_JSON',
     write_disposition='WRITE_APPEND',
