@@ -16,34 +16,8 @@ provider "google" {
   region  = var.region
 }
 
-variable "project_id" {
-  description = "GCP Project ID"
-  type        = string
-}
-
-variable "region" {
-  description = "GCP Region"
-  type        = string
-  default     = "europe-west1"
-}
-
-variable "bucket_name" {
-  description = "GCS Bucket name for raw GitHub data"
-  type        = string
-  default     = "github-activity-batch-raw"
-}
-
-variable "bq_dataset" {
-  description = "BigQuery Dataset name"
-  type        = string
-  default     = "github_activity"
-}
-
-variable "bq_table" {
-  description = "BigQuery Table name"
-  type        = string
-  default     = "github_events"
-}
+# Variables are defined in variables.tf
+# Outputs are defined in outputs.tf
 
 # GCS Bucket for raw GitHub activity data
 resource "google_storage_bucket" "raw_data" {
@@ -108,14 +82,4 @@ EOF
     environment = "production"
     source      = "github"
   }
-}
-
-output "bucket_name" {
-  value       = google_storage_bucket.raw_data.name
-  description = "GCS Bucket name"
-}
-
-output "bq_table_id" {
-  value       = "${google_bigquery_dataset.github.dataset_id}.${google_bigquery_table.github_events.table_id}"
-  description = "BigQuery table ID"
 }
