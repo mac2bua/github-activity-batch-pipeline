@@ -1,12 +1,12 @@
 # Agent Instructions: BATCH Pipeline End-to-End Validation
 
-**You are an autonomous agent with unlimited runtime.** Your goal is to make the Airflow DAG run successfully end-to-end.
+**You are an autonomous agent with unlimited runtime.** Your goal is to make the Airflow DAG run successfully end-to-end with REAL data.
 
 ---
 
 ## Mission
 
-Fix and validate the GitHub Activity Batch Pipeline until ALL 6 tasks complete successfully in Airflow.
+Fix and validate the GitHub Activity Batch Pipeline until ALL 6 tasks complete successfully in Airflow **with actual GCS and BigQuery**.
 
 **Repository:** `~/Repositories/github-activity-batch-pipeline/`
 
@@ -24,50 +24,61 @@ download_github_archive → upload_to_gcs → validate_data_quality → transfor
 
 ---
 
-## Your Loop (Optimized for Speed)
+## Your Loop (REAL DAG, NO SHORTCUTS)
 
 ```
 while DAG_NOT_SUCCESSFUL:
-    # FAST LOOP (30 seconds per iteration)
-    1. Run fast validation: python3 scripts/fast_validate.py 2024-06-15
-       - Downloads 1 hour of GHE data (~60MB, 30s)
-       - Tests transform logic on 100 events
-       - Validates schema types (catches event_id INTEGER bug)
+    1. Copy updated DAG to Airflow:
+       docker cp airflow/dags/github_activity_pipeline.py \
+         $(docker ps -q -f name=airflow-scheduler):/opt/airflow/dags/
     
-    2. If fast validation fails:
-       a. Read error (schema type mismatch, etc.)
-       b. Fix transform_ghe_to_schema() in github_activity_pipeline.py
-       c. Run unit tests: pytest tests/test_pipeline_tasks.py -v (5s)
-       d. Repeat fast validation
-       e. Continue loop
+    2. Restart Airflow scheduler:
+       docker compose restart airflow-scheduler
     
-    3. If fast validation passes (10+ iterations):
-       # SLOW VALIDATION (5-15 minutes, only when confident)
-       a. Copy DAG to Airflow: docker cp ... or cp to dags folder
-       b. Restart scheduler: docker compose restart airflow-scheduler
-       c. Trigger full DAG run
-       d. Monitor all 6 tasks
-       e. If ANY task fails: go back to step 1
+    3. Trigger DAG run:
+       curl -X POST http://localhost:8080/api/v1/dags/github_activity_batch_pipeline/dagRuns \
+         -u admin:admin \
+         -H "Content-Type: application/json" \
+         -d '{"execution_date": "2024-06-15T00:00:00+00:00"}'
     
-    4. Log progress to memory/agent-debugger-status.md
-    5. Continue loop
+    4. Monitor task execution (poll every 30s):
+       - Watch all 6 tasks
+       - Wait for completion (may take 10-20 minutes)
+    
+    5. If ANY task fails:
+       a. Read FULL error log from Airflow API
+       b. Identify root cause (not just symptom)
+       c. Implement fix in github_activity_pipeline.py
+       d. Create/update unit test that would have caught this
+       e. Run pytest to verify fix doesn't break existing tests
+       f. Go to step 1 (re-run full DAG)
+    
+    6. If ALL tasks succeed:
+       a. Verify data in BigQuery (row counts, schema, types)
+       b. Run DAG again with different date (e.g., 2024-01-01)
+       c. Verify second run also succeeds
+    
+    7. Log progress to ~/clawd/memory/agent-debugger-status.md
+    
+    8. Continue loop until:
+       - 2+ consecutive DAG runs succeed
+       - BigQuery data verified correct
+       - All tests passing
 ```
 
-**Key optimization:** Fast validation catches 90% of bugs in 30s. Only run full DAG when confident.
+**NO SHORTCUTS.** Every iteration runs the REAL DAG with REAL GCS and BigQuery.
 
 ---
 
 ## Tools Available
 
 - **Ollama models only** (ollama/qwen3.5:cloud)
-- **Fast validation** (30s): `python3 scripts/fast_validate.py 2024-06-15`
-- **Unit tests** (5s): `pytest tests/test_pipeline_tasks.py -v`
 - Airflow REST API (http://localhost:8080/api/v1/...)
-- Docker Compose (restart services)
-- gcloud (query BigQuery if needed)
+- Docker Compose (copy files, restart services)
+- pytest (run unit tests AFTER fixing)
+- gcloud (query BigQuery for verification)
+- curl (trigger DAGs, fetch logs)
 - Standard shell tools
-
-**Speed:** Fast loop = 30s iterations. Full DAG = only when confident.
 
 ---
 
@@ -78,29 +89,47 @@ while DAG_NOT_SUCCESSFUL:
 3. ✅ `transform_data`: Cast `event_id` to `str()` explicitly
 4. ✅ Added `transform_data` task to convert GHE schema → BigQuery schema
 
-**Your job:** Verify these fixes work in actual Airflow run. There may be NEW bugs.
+**Your job:** Verify these fixes work with REAL Airflow + GCS + BigQuery. There may be NEW bugs that only appear in production.
+
+---
+
+## Common Production Issues to Watch For
+
+1. **GCS authentication** - Service account permissions in container
+2. **BigQuery schema drift** - Table exists but schema changed
+3. **File path mismatches** - Local vs container paths
+4. **Timeout issues** - Large files, slow network
+5. **Data format edge cases** - Null values, unexpected types in GHE data
+6. **Partition/clustering conflicts** - WRITE_APPEND with incompatible schema
 
 ---
 
 ## Exit Condition
 
 **You succeed when:**
-- DAG run completes with status "success"
-- All 6 tasks show green in Airflow UI
-- You have verified data in BigQuery
+- ✅ 2+ consecutive DAG runs complete with status "success"
+- ✅ All 6 tasks show green in Airflow UI
+- ✅ BigQuery data verified:
+  - Row count matches GCS files
+  - Schema matches terraform/bigquery.tf
+  - event_id is STRING (not INTEGER)
+  - All REQUIRED fields populated
+- ✅ Unit tests updated and passing
+- ✅ Status file updated to "COMPLETE"
 
-**Then:** Write status to `memory/agent-debugger-status.md` with "COMPLETE" and notify main session.
+**Then:** Notify main session.
 
 ---
 
 ## Rules
 
-1. **Don't give up** - Run in infinite loop until success
-2. **Test thoroughly** - Create tests for every fix
-3. **Use Ollama only** - No Anthropic/OpenAI models
-4. **Log progress** - Update status file every iteration
-5. **Be thorough** - Fix ALL errors, not just the current one
-6. **Don't notify user** - Only notify when COMPLETE
+1. **NO MOCKS for main validation** - Always run real DAG
+2. **Don't give up** - Run in infinite loop until success
+3. **Test thoroughly** - Create tests for every bug found
+4. **Use Ollama only** - No Anthropic/OpenAI models
+5. **Log progress** - Update status file every iteration
+6. **Be thorough** - Fix ALL errors, run multiple dates
+7. **Don't notify user** - Only notify when COMPLETE
 
 ---
 
@@ -111,29 +140,43 @@ Write to `~/clawd/memory/agent-debugger-status.md`:
 ```markdown
 # Debugger Agent Status
 
-**Started:** 2026-04-04 01:40
-
 **Iteration:** 5
 
 **Current Status:** Fixing load_to_bigquery task
 
-**Errors Found:**
-1. validate_data_quality: 'str' object has no attribute 'size' - FIXED
-2. transform_data: upload() wrong parameter - FIXED
-3. load_to_bigquery: event_id type mismatch - FIXED
-4. [current error]
+**DAG Run ID:** manual__2026-04-04T01-00-00
 
-**Next Action:** Restarting Airflow and re-triggering DAG
+**Task Results:**
+- download_github_archive: ✅ success (15 files)
+- upload_to_gcs: ✅ success
+- validate_data_quality: ✅ success
+- transform_data: ✅ success
+- load_to_bigquery: ❌ failed
+- cleanup_temp_files: skipped
 
-**Progress:** 4/6 tasks passing
+**Error:**
+Field event_id has changed type from STRING to INTEGER
+
+**Root Cause:**
+GHE Archive id field is numeric, needs explicit str() casting
+
+**Fix Applied:**
+Added str() around event.get('id', '') in transform_ghe_to_schema()
+
+**Tests Updated:**
+Added test_transform_event_id_type_casting
+
+**Next Action:** Restarting Airflow, re-triggering DAG
+
+**Progress:** 5/6 tasks passing, 1 failing
 ```
 
 ---
 
 ## Start Now
 
-1. Copy your code to Airflow DAGs folder
-2. Restart Airflow scheduler
+1. Copy DAG to Airflow container
+2. Restart scheduler
 3. Trigger DAG
 4. Begin the loop
 
