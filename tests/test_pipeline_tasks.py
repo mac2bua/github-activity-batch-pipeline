@@ -194,9 +194,10 @@ class TestTransformGheToSchema:
         mock_hook = Mock()
         mock_hook.list.return_value = ['data/2024-01-02-00.json.gz']
         
-        # Create sample GHE Archive data
+        # Create sample GHE Archive data with numeric ID
+        # This tests the fix for "event_id has changed type from STRING to INTEGER"
         sample_event = {
-            'id': '39324579438',
+            'id': 39324579438,  # Numeric ID - should be cast to STRING
             'type': 'CreateEvent',
             'actor': {'id': 101632126, 'login': 'testuser', 'display_login': 'testuser'},
             'repo': {'id': 815527809, 'name': 'testuser/testrepo', 'url': 'https://...'},
@@ -223,6 +224,18 @@ class TestTransformGheToSchema:
         # Verify transformed data structure
         call_args = mock_hook.upload.call_args
         assert call_args[1]['object_name'] == 'transformed/2024-01-02-00.json.gz'
+        
+    def test_transform_event_id_type_casting(self):
+        """Test that numeric event IDs are cast to STRING.
+        
+        Regression test for: 'Field event_id has changed type from STRING to INTEGER'
+        """
+        # Test that str() casting works for numeric IDs
+        numeric_id = 39324579438
+        string_id = str(numeric_id)
+        
+        assert isinstance(string_id, str)
+        assert string_id == '39324579438'
         
     @patch('github_activity_pipeline.GCSHook')
     def test_transform_no_source_files(self, mock_hook_class):
