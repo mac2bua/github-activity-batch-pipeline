@@ -319,8 +319,8 @@ nano .env
 # GCP Project Configuration
 GOOGLE_CLOUD_PROJECT=github-activity-batch-pipeline
 
-# Service Account Key Path
-GOOGLE_APPLICATION_CREDENTIALS=/Users/cristian/Repositories/github-activity-batch-pipeline/keys/gcp-creds.json
+# Service Account Key Path (use absolute path)
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/github-activity-batch-pipeline/keys/gcp-creds.json
 
 # Airflow Fernet Key (encrypts passwords in connections)
 AIRFLOW__CORE__FERNET_KEY=<paste generated key here>
