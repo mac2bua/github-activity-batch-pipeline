@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: github
+    database: "{{ env_var('GCP_PROJECT_ID') }}"
+    schema: "{{ env_var('BQ_DATASET', 'gh_activity_dev') }}"
+    tables:
+      - name: github_events
+        description: "Raw GitHub events"
+        columns:
+          - name: id
+            tests: [unique, not_null]
+          - name: created_at
+            tests: [not_null]

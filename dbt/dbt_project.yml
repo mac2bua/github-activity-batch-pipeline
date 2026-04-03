@@ -1,0 +1,14 @@
+name: 'github_activity'
+version: '1.0.0'
+config-version: 2
+profile: 'github_activity'
+model-paths: ["models"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  github_activity:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

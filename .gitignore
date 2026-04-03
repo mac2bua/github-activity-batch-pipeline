@@ -1,0 +1,12 @@
+*.tfstate
+*.tfstate.lock.info
+.terraform/
+airflow/logs/*
+*.pyc
+__pycache__/
+dbt/target/
+dbt/dbt_packages/
+.env
+*.json
+!.env.example
+.DS_Store
