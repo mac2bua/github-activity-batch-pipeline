@@ -75,19 +75,43 @@ BQ_TABLE = 'github_events'
 
 def get_project_id() -> str:
     """
-    Retrieve GCP project ID from Airflow Variables.
+    Retrieve GCP project ID from Airflow Variables or environment.
+    
+    Priority:
+    1. Airflow Variable 'project_id'
+    2. Environment variable 'GOOGLE_CLOUD_PROJECT'
+    3. Fallback to placeholder (will cause failure if not configured)
     
     Returns:
-        str: The GCP project ID, or a placeholder if not configured.
+        str: The GCP project ID.
+    
+    Raises:
+        ValueError: If project_id is not configured anywhere.
     """
+    # Try Airflow Variable first
     try:
-        return Variable.get("project_id")
+        project_id = Variable.get("project_id")
+        if project_id and project_id != "your-project-id":
+            return project_id
     except Exception:
-        logger.warning("project_id Variable not found, using placeholder")
-        return "your-project-id"
+        pass
+    
+    # Try environment variable
+    import os
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    if project_id and project_id != "your-gcp-project-id":
+        return project_id
+    
+    # No valid project_id found
+    raise ValueError(
+        "project_id not configured. Set Airflow Variable 'project_id' or "
+        "environment variable 'GOOGLE_CLOUD_PROJECT'."
+    )
 
 
-GCS_BUCKET = f'github-activity-batch-raw-{get_project_id()}'
+# Get project ID at DAG parse time (will raise if not configured)
+PROJECT_ID = get_project_id()
+GCS_BUCKET = f'github-activity-batch-raw-{PROJECT_ID}'
 GCS_PREFIX = 'raw/{{ ds }}'
 
 
@@ -282,7 +306,7 @@ load_task = GCSToBigQueryOperator(
     task_id='load_to_bigquery',
     bucket=GCS_BUCKET,
     source_objects=[f'raw/{{{{ ds }}}}/'],
-    destination_project_dataset_table=f'{get_project_id()}.{BQ_DATASET}.{BQ_TABLE}',
+    destination_project_dataset_table=f'{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}',
     source_format='NEWLINE_DELIMITED_JSON',
     write_disposition='WRITE_APPEND',
     max_bad_records=100,
