@@ -167,5 +167,105 @@ This fix was made after fixing the Airflow 2.8+ `GCSToBigQueryOperator` compatib
 
 1. **GCSToBigQueryOperator**: Removed invalid parameters, added integration tests
 2. **Project ID**: Fail fast with clear error, added unit tests
+3. **Source Objects**: Fixed GCS path pattern mismatch, added unit tests
 
-Both follow the principle: **Fail fast with clear errors, not late with confusing ones.**
+All follow the principle: **Fail fast with clear errors, not late with confusing ones.**
+
+---
+
+# Bug Fix Summary: GCS Source Objects Pattern Mismatch
+
+## Problem
+
+The `load_to_bigquery` task was failing with:
+
+```
+google.api_core.exceptions.NotFound: 404 Not found: URI 
+gs://github-activity-batch-raw-github-activity-batch-pipeline/raw/2024-01-02/
+```
+
+### Root Cause
+
+The `source_objects` parameter in `GCSToBigQueryOperator` was set to a directory pattern:
+
+```python
+source_objects=[f'raw/{{{{ ds }}}}/']  # ← BUG: Directory doesn't exist
+```
+
+But GCS doesn't have real directories. The `upload_to_gcs` task uploads individual files:
+
+```
+raw/2024-01-02/2024-01-02-00.json.gz
+raw/2024-01-02/2024-01-02-01.json.gz
+...
+```
+
+There is NO object called `raw/2024-01-02/` in GCS. That "directory" is just a prefix in the file object names.
+
+When `GCSToBigQueryOperator` tried to load from `raw/2024-01-02/`, BigQuery looked for that exact object, didn't find it, and returned 404.
+
+### Why This Was Confusing
+
+1. **GCS has flat namespace**: "Directories" are just prefixes in object names
+2. **Upload creates files, not directories**: `raw/{ds}/file.json.gz` creates one object
+3. **Directory pattern matches nothing**: `raw/{{ ds }}/` looks for non-existent object
+4. **Error message is misleading**: "Not found: URI gs://..." suggests the bucket or path is wrong
+
+## Solution
+
+Changed `source_objects` to use wildcard pattern that matches actual files:
+
+```python
+source_objects=[f'raw/{{{{ ds }}}}/*.json.gz']  # ← FIXED: Matches uploaded files
+```
+
+This pattern:
+- Uses `*` wildcard to match all `.json.gz` files
+- Matches the exact pattern uploaded by `upload_to_gcs` task
+- Works with GCS's flat object namespace
+
+## Tests Added
+
+Created `tests/test_gcs_source_objects.py` with:
+
+1. **Test upload object_name format** - Verifies upload creates `raw/{ds}/filename.json.gz`
+2. **Test source_objects uses wildcard** - Verifies load task uses `*.json.gz` pattern
+3. **Test source_objects not directory-only** - Verifies pattern doesn't end with `/`
+4. **Test upload and load use same prefix** - Verifies both use `raw/` consistently
+5. **Test GCS bucket consistency** - Verifies both tasks use same bucket
+6. **Conceptual test: GCS has no directories** - Documents GCS flat namespace behavior
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `airflow/dags/github_activity_pipeline.py` | Fixed `source_objects` pattern |
+| `tests/test_gcs_source_objects.py` | New test suite (315 lines) |
+| `docs/BUGFIX_SUMMARY.md` | This file |
+
+## How to Verify the Fix
+
+### Before Fix (Broken)
+```
+source_objects=['raw/{{ ds }}/']
+Result: 404 Not found: URI gs://bucket/raw/2024-01-02/
+```
+
+### After Fix (Working)
+```
+source_objects=['raw/{{ ds }}/*.json.gz']
+Result: Finds and loads all matching files
+```
+
+## Commit
+
+- `4dbc747` - Fix: GCSToBigQueryOperator source_objects pattern mismatch
+
+## Key Lesson
+
+**GCS has no directories.** Everything is a flat namespace with object names that contain `/` characters. When specifying source objects:
+
+- ❌ `raw/2024-01-02/` - Looks for non-existent directory object
+- ✅ `raw/2024-01-02/*.json.gz` - Matches actual file objects
+
+Always use wildcards to match file patterns, never directory-only paths.
