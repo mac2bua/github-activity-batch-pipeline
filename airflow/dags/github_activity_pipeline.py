@@ -495,6 +495,8 @@ load_task = GCSToBigQueryOperator(
     write_disposition='WRITE_APPEND',
     max_bad_records=100,
     allow_quoted_newlines=True,
+    # Use existing table schema - do NOT autodetect (prevents type inference errors)
+    autodetect=False,
     dag=dag,
 )
 
