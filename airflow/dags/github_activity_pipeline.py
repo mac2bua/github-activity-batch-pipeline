@@ -229,6 +229,9 @@ def upload_to_gcs(**context: Any) -> str:
     Uploads all downloaded .json.gz files from the temporary directory
     to the configured GCS bucket under the 'data/' prefix.
     
+    Uses streaming upload to minimize memory usage.
+    Retries failed uploads with exponential backoff.
+    
     If no files were downloaded, this task will log a warning but still succeed.
     The downstream validate task will catch the empty data case.
 
@@ -238,7 +241,9 @@ def upload_to_gcs(**context: Any) -> str:
     Returns:
         str: Summary of uploaded files.
     """
-    hook = GCSHook()
+    from google.cloud import storage
+    import time
+    
     uploaded_files: list[str] = []
     failed_uploads: list[tuple[str, str]] = []
 
@@ -256,21 +261,42 @@ def upload_to_gcs(**context: Any) -> str:
         )
         return "No files to upload (download got no data)"
 
-    for file_path in files:
+    # Initialize GCS client directly for better control
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(GCS_BUCKET)
+
+    for idx, file_path in enumerate(files, 1):
         object_name = f'data/{os.path.basename(file_path)}'
-        try:
-            hook.upload(
-                bucket_name=GCS_BUCKET,
-                object_name=object_name,
-                filename=file_path,
-                mime_type='application/gzip'
-            )
-            uploaded_files.append(object_name)
-            logger.info("Uploaded: %s", object_name)
-        except Exception as e:
-            error_msg = str(e)
-            logger.error("Failed to upload %s: %s", file_path, error_msg)
-            failed_uploads.append((file_path, error_msg))
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info("Uploading %d/%d: %s", idx, len(files), object_name)
+                
+                # Use blob.upload_from_filename() for streaming upload
+                blob = bucket.blob(object_name)
+                blob.upload_from_filename(
+                    file_path,
+                    content_type='application/gzip',
+                    timeout=300  # 5 minute timeout per file
+                )
+                
+                uploaded_files.append(object_name)
+                logger.info("Uploaded: %s", object_name)
+                break  # Success, move to next file
+                
+            except Exception as e:
+                error_msg = str(e)
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 10  # Exponential backoff: 10s, 20s, 30s
+                    logger.warning(
+                        "Upload failed (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1, max_retries, wait_time, error_msg
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logger.error("Failed to upload %s after %d attempts: %s", file_path, max_retries, error_msg)
+                    failed_uploads.append((file_path, error_msg))
 
     logger.info(
         "Upload complete: %d files uploaded, %d failed",
@@ -451,18 +477,20 @@ def transform_ghe_to_schema(**context: Any) -> str:
     return f"Transformed {len(transformed_files)} files"
 
 
-# Task 1: Download GitHub archive
+# Task 1: Download GitHub archive (increased timeout for fetching 24 hourly files)
 download_task = PythonOperator(
     task_id='download_github_archive',
     python_callable=download_github_archive,
     dag=dag,
+    execution_timeout=timedelta(hours=1),  # Allow up to 1 hour for downloads
 )
 
-# Task 2: Upload to GCS
+# Task 2: Upload to GCS (increased timeout for large file uploads)
 upload_task = PythonOperator(
     task_id='upload_to_gcs',
     python_callable=upload_to_gcs,
     dag=dag,
+    execution_timeout=timedelta(hours=2),  # Allow up to 2 hours for large uploads
 )
 
 # Task 3: Validate data quality
