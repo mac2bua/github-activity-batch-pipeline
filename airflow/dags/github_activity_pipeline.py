@@ -563,20 +563,43 @@ BQ_SCHEMA = [
     {'name': 'loaded_at', 'type': 'TIMESTAMP', 'mode': 'REQUIRED'},
 ]
 
-# CRITICAL: source_objects must match the transform_data task's output.
-# Transform task outputs: 'transformed/*.json.gz'
-load_task = GCSToBigQueryOperator(
+
+def load_to_bigquery_date_specific(**context: Any) -> str:
+    """
+    Load transformed data to BigQuery for a specific execution_date only.
+
+    This ensures each DAG run only loads its own date's data,
+    preventing cross-contamination between different dates.
+    """
+    execution_date = context['execution_date']
+    date_str = execution_date.strftime('%Y-%m-%d')
+
+    # Only load files for this execution_date
+    source_objects = [f'transformed/{date_str}-*.json.gz']
+
+    logger.info("Loading to BigQuery: %s (date=%s)", source_objects, date_str)
+
+    load_operator = GCSToBigQueryOperator(
+        task_id='load_to_bigquery_inner',
+        bucket=GCS_BUCKET,
+        source_objects=source_objects,
+        destination_project_dataset_table=f'{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}',
+        schema_fields=BQ_SCHEMA,
+        source_format='NEWLINE_DELIMITED_JSON',
+        write_disposition='WRITE_APPEND',
+        create_disposition='CREATE_IF_NEEDED',
+        max_bad_records=100,
+        allow_quoted_newlines=True,
+    )
+
+    return load_operator.execute(context=context)
+
+
+load_task = PythonOperator(
     task_id='load_to_bigquery',
-    bucket=GCS_BUCKET,
-    source_objects=['transformed/*.json.gz'],
-    destination_project_dataset_table=f'{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}',
-    schema_fields=BQ_SCHEMA,
-    source_format='NEWLINE_DELIMITED_JSON',
-    write_disposition='WRITE_APPEND',
-    create_disposition='CREATE_IF_NEEDED',
-    max_bad_records=100,
-    allow_quoted_newlines=True,
+    python_callable=load_to_bigquery_date_specific,
     dag=dag,
+    execution_timeout=timedelta(minutes=10),
 )
 
 # Task 5: Cleanup temporary files
