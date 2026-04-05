@@ -9,7 +9,7 @@
             "data_type": "date",
             "granularity": "day"
         },
-        cluster_by=['repo_owner', 'repo_name_parsed'],
+        cluster_by=['repo_owner', 'repo_name'],
         tags=['mart', 'repository', 'health']
     )
 }}
@@ -100,7 +100,7 @@ health_scores as (
 
 select
     *,
-    
+
     -- Overall health score (weighted average)
     round(
         (activity_score * 0.4) +
@@ -108,14 +108,13 @@ select
         (consistency_score * 0.3),
         2
     ) as overall_health_score,
-    
+
     -- Health classification
     case
-        when overall_health_score >= 80 then 'Healthy'
-        when overall_health_score >= 50 then 'Moderate'
-        when overall_health_score >= 20 then 'At Risk'
+        when round((activity_score * 0.4) + (diversity_score * 0.3) + (consistency_score * 0.3), 2) >= 80 then 'Healthy'
+        when round((activity_score * 0.4) + (diversity_score * 0.3) + (consistency_score * 0.3), 2) >= 50 then 'Moderate'
+        when round((activity_score * 0.4) + (diversity_score * 0.3) + (consistency_score * 0.3), 2) >= 20 then 'At Risk'
         else 'Critical'
     end as health_status
-    
+
 from health_scores
-order by snapshot_date desc, overall_health_score desc

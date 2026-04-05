@@ -75,4 +75,3 @@ select
     
 from daily_aggregates da
 join daily_totals dt on da.stats_date = dt.stats_date
-order by da.stats_date desc, da.total_events desc

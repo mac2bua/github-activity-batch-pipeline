@@ -9,7 +9,7 @@
 }}
 
 with source as (
-    select * from {{ source('github_activity', 'github_events') }}
+    select * from {{ source('github', 'github_events') }}
 ),
 
 cleaned as (
@@ -42,21 +42,57 @@ cleaned as (
         loaded_at,
         
         -- Data quality flags
-        case 
-            when event_id is null or event_id = '' then false 
-            else true 
+        case
+            when event_id is null or event_id = '' then false
+            else true
         end as is_valid_event,
-        
-        case 
-            when actor_login is null or actor_login = '' then false 
-            else true 
+
+        case
+            when actor_login is null or actor_login = '' then false
+            else true
         end as is_valid_actor,
-        
-        case 
-            when repo_name is null or repo_name = '' then false 
-            else true 
-        end as is_valid_repo
-        
+
+        case
+            when repo_name is null or repo_name = '' then false
+            else true
+        end as is_valid_repo,
+
+        -- AI Agent Detection (strict matching - no false positives)
+        -- Only classify as AI agent if it's a verified bot account
+        case
+            -- Known AI coding agents (exact matches only)
+            when actor_login in ('Copilot', 'copilot[bot]', 'github-copilot[bot]') then true
+            when actor_login = 'claude[bot]' then true
+            when actor_login = 'cursor[bot]' then true
+            when actor_login in ('coderabbitai[bot]', 'coderabbitai-qa[bot]', 'coderabbitaidev[bot]') then true
+            when actor_login = 'lovable-dev[bot]' then true
+            when actor_login like 'dependabot%' then true
+            -- CI/CD and automation bots
+            when actor_login in ('github-actions[bot]', 'renovate[bot]', 'vercel[bot]', 'pull[bot]', 'swa-runner-app[bot]') then true
+            -- All other bots with [bot] suffix
+            when actor_login like '%[bot]' then true
+            else false
+        end as is_ai_agent,
+
+        -- Actor type classification (strict matching to avoid false positives)
+        case
+            -- AI Coding Agents (verified bot accounts only)
+            when actor_login in ('Copilot', 'copilot[bot]', 'github-copilot[bot]') then 'Copilot'
+            when actor_login = 'claude[bot]' then 'Claude'
+            when actor_login = 'cursor[bot]' then 'Cursor'
+            when actor_login in ('coderabbitai[bot]', 'coderabbitai-qa[bot]', 'coderabbitaidev[bot]') then 'CodeRabbit'
+            when actor_login = 'lovable-dev[bot]' then 'Lovable'
+            when actor_login like 'dependabot%' then 'Dependabot'
+
+            -- CI/CD Bots (grouped category)
+            when actor_login in ('github-actions[bot]', 'renovate[bot]', 'vercel[bot]', 'pull[bot]', 'swa-runner-app[bot]') then 'CI/CD Bot'
+
+            -- Other automation with [bot] suffix
+            when actor_login like '%[bot]' then 'Other Bot'
+
+            else 'Human'
+        end as actor_type
+
     from source
     where event_date is not null
 )

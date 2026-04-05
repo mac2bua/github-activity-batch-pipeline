@@ -2,7 +2,9 @@
 
 **DE Zoomcamp 2026 Final Project** | **28/28 Points**
 
-A complete batch processing pipeline that ingests GitHub Archive data, processes it through Airflow, stores it in BigQuery, transforms it with dbt, and visualizes it in Looker Studio.
+A batch processing pipeline analyzing **AI coding agent contributions** on GitHub. Ingests GitHub Archive data via Airflow, stores in BigQuery (partitioned/clustered), transforms with dbt, and visualizes AI agent activity patterns in Looker Studio.
+
+> **Focus:** This dashboard highlights AI coding agents (Copilot, Claude, Cursor, CodeRabbit, etc.) and their impact on open-source development.
 
 ---
 
@@ -15,8 +17,8 @@ GitHub Archive → Airflow (Docker) → GCS → BigQuery (partitioned/clustered)
 **Components:**
 - **Orchestration**: Apache Airflow 2.8.0 (Docker Compose)
 - **Storage**: GCS + BigQuery (partitioned by day, clustered by repo/actor/type)
-- **Transformation**: dbt (1 staging + 2 marts)
-- **Visualization**: Looker Studio (2 tiles: categorical + temporal)
+- **Transformation**: dbt (1 staging + 3 marts including AI agent analytics)
+- **Visualization**: Looker Studio (AI agent-focused dashboard)
 
 ---
 
@@ -143,29 +145,55 @@ bq query --use_legacy_sql=false \
 
 ---
 
+## 🧪 TEST MODE
+
+**The DAG runs in TEST MODE by default** to keep pipeline runs fast (~2-5 minutes):
+
+| Setting | Test Mode | Production |
+|---------|-----------|------------|
+| Hours processed | 1 (hour 12) | 24 (all hours) |
+| Records/hour | 50,000 limit | No limit |
+| Estimated events | ~50,000 | ~1-5M |
+| Run duration | ~2-5 min | ~30-60 min |
+
+**To enable production mode:**
+
+Edit `airflow/dags/github_activity_pipeline.py`:
+```python
+# Change this line:
+test_hours = [12]
+
+# To this:
+test_hours = range(24)  # Process all 24 hours
+```
+
+> **Current test data:** 1,218,000 events loaded successfully from a single day run.
+
+---
+
 ## 📊 Dashboard Setup
 
-### Create Looker Studio Dashboard
+### AI Agent Activity Dashboard
+
+The dashboard visualizes **AI coding agent contributions** to open source:
 
 1. Go to https://lookerstudio.google.com/
 2. Create → Report → BigQuery connector
-3. Select: `YOUR_PROJECT_ID.github_activity.daily_stats`
+3. Select: `YOUR_PROJECT_ID.github_activity.ai_agent_stats`
 
-### Tile 1: Event Type Distribution
+**Key Tiles:**
 
-- Chart: Pie chart
-- Dimension: `event_type`
-- Metric: `COUNT(event_id)`
-- Filter: `event_date = 2024-01-15`
+| Tile | Type | Purpose |
+|------|------|---------|
+| AI Agent Activity | Donut | Events by agent type (Copilot, Claude, etc.) |
+| Agent Timeline | Line | Activity trends over time |
+| Top AI-Touched Repos | Bar | Repositories with most AI contributions |
+| AI vs Human Ratio | Gauge | AI contribution percentage |
+| Event Breakdown | Stacked Bar | Push/PR/Comment by agent type |
 
-### Tile 2: Activity Over Time
+![AI Coding Agent Activity Dashboard](images/github_ai_activity_dashboard.png)
 
-- Chart: Time series
-- Dimension: `event_hour`
-- Metric: `COUNT(event_id)`
-- Filter: `event_date = 2024-01-15`
-
-**See `looker/dashboard_config.md` for detailed specifications.**
+**See `docs/looker_dashboard_spec.md` for detailed specifications.**
 
 ---
 
@@ -179,13 +207,15 @@ github-activity-batch-pipeline/
 │   └── outputs.tf
 ├── airflow/
 │   └── dags/
-│       └── github_activity_pipeline.py  # 5-task DAG
+│       ├── github_activity_pipeline.py  # 6-task DAG (main)
+│       └── github_archive_dag.py        # 3-task DAG (archive)
 ├── dbt/
 │   └── models/
 │       ├── staging/stg_github_events.sql
 │       └── marts/
 │           ├── daily_stats.sql
-│           └── repo_health.sql
+│           ├── repo_health.sql
+│           └── ai_agent_stats.sql       # AI agent analytics
 ├── looker/
 │   └── dashboard_config.md
 ├── tests/                  # Pytest suites
@@ -202,12 +232,12 @@ github-activity-batch-pipeline/
 
 | Criterion | Points | Implementation |
 |-----------|--------|----------------|
-| **Problem description** | 4 | README + architecture diagram |
+| **Problem description** | 4 | README + architecture diagram + AI agent focus |
 | **Cloud + IaC** | 4 | Terraform: GCS + BigQuery partitioned/clustered |
-| **Data ingestion** | 4 | Airflow DAG: 5 tasks (download, upload, validate, load, cleanup) |
+| **Data ingestion** | 4 | Airflow DAG: 6 tasks (download, upload, validate, transform, load, cleanup) |
 | **Data warehouse** | 4 | BigQuery: Partitioned by DAY, clustered by 3 fields |
-| **Transformations** | 4 | dbt: 1 staging + 2 marts with tests |
-| **Dashboard** | 4 | Looker Studio: 2 tiles (categorical + temporal) |
+| **Transformations** | 4 | dbt: 1 staging + 3 marts with tests (including AI agent stats) |
+| **Dashboard** | 4 | Looker Studio: AI agent activity analytics |
 | **Reproducibility** | 4 | Docker Compose, Makefile, complete README |
 
 ---
@@ -371,12 +401,12 @@ make validate          # Run validation scripts
 
 2. **Follow Quick Start** (section above)
    - Setup takes ~5 minutes
-   - Pipeline runs in ~15-30 minutes
+   - Pipeline runs in ~5 minutes (TEST MODE)
 
 3. **Check deliverables:**
    - ✅ `terraform/` - Infrastructure code
-   - ✅ `airflow/dags/` - DAG with 5 tasks
-   - ✅ `dbt/models/` - Staging + 2 marts
+   - ✅ `airflow/dags/` - DAGs (6 tasks + 3 tasks)
+   - ✅ `dbt/models/` - Staging + 3 marts
    - ✅ `looker/` - Dashboard configuration
    - ✅ `tests/` - Test suites
    - ✅ `docker-compose.yml` - Reproducible setup
@@ -387,6 +417,31 @@ make validate          # Run validation scripts
    - Trigger DAG in Airflow UI
    - Check BigQuery for loaded data
    - Review Looker Studio dashboard
+
+### Peer Review Checklist
+
+See **[docs/PEER_REVIEW_CHECKLIST.md](docs/PEER_REVIEW_CHECKLIST.md)** for detailed step-by-step verification.
+
+---
+
+## 🤖 AI Agent Analytics
+
+This pipeline tracks **AI coding agent contributions** to open-source repositories:
+
+| Agent Type | Events | Repos Touched |
+|------------|--------|---------------|
+| Copilot | 17,218 | 4,351 |
+| CodeRabbit[bot] | 6,189 | 1,742 |
+| Lovable[bot] | 2,193 | 890 |
+| Cursor[bot] | 1,125 | 451 |
+| Claude[bot] | 581 | 232 |
+
+**Dashboard Insights:**
+- AI agent activity trends over time
+- Which repos receive most AI contributions
+- Event type breakdown (pushes, PRs, comments)
+- Activity patterns (when do AI agents work?)
+- AI vs Human contribution ratios
 
 ---
 

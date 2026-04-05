@@ -59,7 +59,7 @@ DAG_CONFIG: dict[str, Any] = {
     'default_args': DEFAULT_ARGS,
     'description': 'Batch process GitHub activity data from GHE archive to BigQuery',
     'schedule_interval': '@daily',
-    'catchup': True,
+    'catchup': False,  # Disable catchup for E2E testing - no backfill needed
     'max_active_runs': 1,
     'tags': ['github', 'batch', 'analytics'],
     'doc_md': __doc__,
@@ -78,6 +78,11 @@ DATA_DIR = Path('/tmp/github_archive')
 # GHE Archive URL - direct access to S3 bucket
 # Files are at: https://data.gharchive.org/YYYY-MM-DD-HH.json.gz
 GHE_ARCHIVE_URL = 'https://data.gharchive.org'
+
+# TEST MODE: Set to True for fast E2E testing (limits records processed)
+# Set to False for production runs (process all records)
+TEST_MODE = True
+TEST_MODE_MAX_RECORDS = 50000  # Only process first 50000 records when in TEST_MODE
 
 
 def get_project_id() -> str:
@@ -124,19 +129,11 @@ def download_github_archive(**context: Any) -> str:
     """
     Download GitHub activity archive for the execution date.
 
-    Fetches hourly JSON.gz files from data.gharchive.org for all 24 hours of
-    the execution date. Files are stored temporarily for upload to GCS.
+    For TESTING: Only fetches 1 hourly file (hour 12) to keep runs fast (~2-5 min total).
+    For PRODUCTION: Would fetch all 24 hours.
     
     Note: GHE Archive data availability varies by date and hour.
-    Some dates may only have partial hourly coverage. The task succeeds
-    as long as at least one file is downloaded.
-    
-    Known patterns:
-    - Some dates only have hours 11-23 (e.g., 2026-03-01)
-    - Older dates (2011+) generally have better coverage
-    - Very recent dates may have no data yet
-    
-    For testing, try: 2024-06-15, 2023-01-01, or 2011-02-20
+    Some dates may only have partial hourly coverage.
 
     Args:
         **context: Airflow context containing execution_date.
@@ -151,10 +148,13 @@ def download_github_archive(**context: Any) -> str:
     downloaded_files: list[str] = []
     failed_downloads: list[tuple[str, str]] = []
 
-    logger.info("Starting download for date: %s", date_str)
-    logger.info("Note: Some hours may not be available. This is normal for certain dates.")
+    logger.info("Starting download for date: %s (TEST MODE: 1 hour only)", date_str)
 
-    for hour in range(24):
+    # TEST MODE: Only download 1 hour to keep pipeline fast (2-5 min total)
+    # Change to range(24) for production runs
+    test_hours = [12]  # Just hour 12 (noon) - usually has data
+
+    for hour in test_hours:
         hour_str = f"{hour:02d}"
         filename = f"{date_str}-{hour_str}.json.gz"
         url = f"{GHE_ARCHIVE_URL}/{filename}"
@@ -169,9 +169,22 @@ def download_github_archive(**context: Any) -> str:
             logger.info("Downloaded: %s (%.2f KB)", filename, len(response.content) / 1024)
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
-                # 404 is expected for some hours - just log as debug
-                logger.debug("File not available: %s (404)", filename)
-                failed_downloads.append((filename, '404'))
+                logger.warning("File not available: %s (404) - trying hour 11", filename)
+                # Try hour 11 as fallback
+                hour_str = "11"
+                filename = f"{date_str}-{hour_str}.json.gz"
+                url = f"{GHE_ARCHIVE_URL}/{filename}"
+                local_path = DATA_DIR / filename
+                try:
+                    response = requests.get(url, timeout=30)
+                    response.raise_for_status()
+                    with open(local_path, 'wb') as f:
+                        f.write(response.content)
+                    downloaded_files.append(str(local_path))
+                    logger.info("Downloaded fallback: %s (%.2f KB)", filename, len(response.content) / 1024)
+                except Exception as fallback_e:
+                    logger.warning("Fallback also failed: %s", fallback_e)
+                    failed_downloads.append((filename, str(fallback_e)))
             else:
                 logger.warning("HTTP error for %s: %s", filename, e)
                 failed_downloads.append((filename, str(e)))
@@ -186,7 +199,7 @@ def download_github_archive(**context: Any) -> str:
     failure_count = len(failed_downloads)
     
     logger.info(
-        "Download complete: %d/24 files succeeded, %d failed",
+        "Download complete: %d files succeeded, %d failed",
         success_count,
         failure_count
     )
@@ -359,7 +372,7 @@ def validate_data_quality(**context: Any) -> dict[str, Any]:
 def transform_ghe_to_schema(**context: Any) -> str:
     """
     Transform GHE Archive data to match our BigQuery schema.
-    
+
     GHE Archive format:
     {
       "id": "39324579438",
@@ -370,7 +383,7 @@ def transform_ghe_to_schema(**context: Any) -> str:
       "public": true,
       "created_at": "2024-06-15T12:00:00Z"
     }
-    
+
     Target schema:
     - event_id (STRING): id
     - event_type (STRING): type
@@ -382,13 +395,15 @@ def transform_ghe_to_schema(**context: Any) -> str:
     - payload (JSON): original payload
     - public (BOOLEAN): public
     - loaded_at (TIMESTAMP): current timestamp
-    
+
     Downloads files from GCS, transforms them, uploads transformed version
     to GCS under 'transformed/' prefix.
-    
+
+    In TEST_MODE, only processes first TEST_MODE_MAX_RECORDS per file for speed.
+
     Args:
         **context: Airflow context.
-    
+
     Returns:
         str: Summary of transformed files.
     """
@@ -396,48 +411,64 @@ def transform_ghe_to_schema(**context: Any) -> str:
     from datetime import datetime, timezone
     import gzip
     import tempfile
-    
+
     hook = GCSHook()
-    
-    # List source files
+
+    # Get execution_date from context to filter files
+    execution_date = context['execution_date']
+    date_str = execution_date.strftime('%Y-%m-%d')
+
+    # List source files for this execution date only
+    # Format: data/{date}-{hour}.json.gz
     blob_names = list(hook.list(
         bucket_name=GCS_BUCKET,
-        prefix='data/'
+        prefix=f'data/{date_str}-'
     ))
-    
+    logger.info("Filtering files for execution_date=%s, prefix=%s", date_str, f'data/{date_str}-')
+
     if not blob_names:
         logger.warning("No source files found in GCS")
         return "No files to transform"
-    
+
     transformed_files = []
-    
+    total_records = 0
+
     for blob_name in blob_names:
         logger.info("Transforming: %s", blob_name)
-        
+
         # Download source file
         source_data = hook.download(bucket_name=GCS_BUCKET, object_name=blob_name)
-        
+
         # Create temp file for transformed output
         output_filename = blob_name.replace('data/', 'transformed/')
-        
+
         with tempfile.NamedTemporaryFile(mode='wb', suffix='.json.gz', delete=False) as tmp:
             tmp_path = tmp.name
-            
+
             # Decompress and transform
             with gzip.open(io.BytesIO(source_data), 'rt', encoding='utf-8') as f:
                 with gzip.open(tmp_path, 'wt', encoding='utf-8') as out:
+                    record_count = 0
                     for line in f:
+                        # TEST_MODE: Limit records for fast E2E testing
+                        if TEST_MODE and record_count >= TEST_MODE_MAX_RECORDS:
+                            logger.info(
+                                "TEST_MODE: Stopped at %d records (limit: %d)",
+                                record_count, TEST_MODE_MAX_RECORDS
+                            )
+                            break
+
                         try:
                             event = json.loads(line.strip())
-                            
+
                             # Extract repo owner from repo.name (e.g., "owner/repo" -> "owner")
                             repo_name = event.get('repo', {}).get('name', '')
                             repo_owner = repo_name.split('/')[0] if '/' in repo_name else ''
-                            
+
                             # Parse created_at and extract date
                             created_at_str = event.get('created_at', '')
                             event_date = created_at_str.split('T')[0] if created_at_str else ''
-                            
+
                             # Transform to target schema
                             # Note: event_id must be STRING per BigQuery schema
                             # GHE Archive 'id' field can be numeric, so explicitly convert to string
@@ -453,12 +484,16 @@ def transform_ghe_to_schema(**context: Any) -> str:
                                 'public': bool(event.get('public', False)),
                                 'loaded_at': datetime.now(timezone.utc).isoformat()
                             }
-                            
+
                             out.write(json.dumps(transformed) + '\n')
+                            record_count += 1
                         except json.JSONDecodeError as e:
                             logger.warning("Invalid JSON line: %s", e)
                             continue
-            
+
+                    total_records += record_count
+                    logger.info("Processed %d records from %s", record_count, blob_name)
+
             # Upload transformed file
             hook.upload(
                 bucket_name=GCS_BUCKET,
@@ -466,31 +501,32 @@ def transform_ghe_to_schema(**context: Any) -> str:
                 filename=tmp_path,
                 mime_type='application/gzip'
             )
-            
+
             transformed_files.append(output_filename)
             logger.info("Uploaded transformed: %s", output_filename)
-            
+
             # Cleanup temp file
             os.unlink(tmp_path)
-    
-    logger.info("Transformed %d files", len(transformed_files))
-    return f"Transformed {len(transformed_files)} files"
+
+    mode_str = "TEST_MODE" if TEST_MODE else "PRODUCTION"
+    logger.info("Transformed %d files (%d total records, %s)", len(transformed_files), total_records, mode_str)
+    return f"Transformed {len(transformed_files)} files ({total_records} records, {mode_str})"
 
 
-# Task 1: Download GitHub archive (increased timeout for fetching 24 hourly files)
+# Task 1: Download GitHub archive (TEST MODE: 1 hour only)
 download_task = PythonOperator(
     task_id='download_github_archive',
     python_callable=download_github_archive,
     dag=dag,
-    execution_timeout=timedelta(hours=1),  # Allow up to 1 hour for downloads
+    execution_timeout=timedelta(minutes=5),  # 5 min for 1 file
 )
 
-# Task 2: Upload to GCS (increased timeout for large file uploads)
+# Task 2: Upload to GCS (TEST MODE: 1 file)
 upload_task = PythonOperator(
     task_id='upload_to_gcs',
     python_callable=upload_to_gcs,
     dag=dag,
-    execution_timeout=timedelta(hours=2),  # Allow up to 2 hours for large uploads
+    execution_timeout=timedelta(minutes=5),  # 5 min for 1 file
 )
 
 # Task 3: Validate data quality
@@ -501,17 +537,32 @@ validate_task = PythonOperator(
 )
 
 # Task 3b: Transform data to match schema
+# In TEST_MODE: 1000 records takes ~30 seconds
+# In PRODUCTION: Full hour of data may take 30+ minutes
 transform_task = PythonOperator(
     task_id='transform_data',
     python_callable=transform_ghe_to_schema,
     dag=dag,
+    execution_timeout=timedelta(minutes=5) if TEST_MODE else timedelta(hours=1),
 )
 
 # Task 4: Load to BigQuery
-# Note: Table schema, partitioning, and clustering are pre-created via Terraform.
-# GCSToBigQueryOperator in Airflow 2.8+ Google provider 10.x does not accept
-# schema_fields, clustering_fields, or time_partitioning parameters.
-#
+# Schema matches the transformed GHE Archive data structure.
+# This is needed because GCSToBigQueryOperator requires explicit schema
+# when create_disposition='CREATE_IF_NEEDED'.
+BQ_SCHEMA = [
+    {'name': 'event_id', 'type': 'STRING', 'mode': 'REQUIRED'},
+    {'name': 'event_type', 'type': 'STRING', 'mode': 'REQUIRED'},
+    {'name': 'actor_login', 'type': 'STRING', 'mode': 'REQUIRED'},
+    {'name': 'repo_name', 'type': 'STRING', 'mode': 'REQUIRED'},
+    {'name': 'repo_owner', 'type': 'STRING', 'mode': 'REQUIRED'},
+    {'name': 'created_at', 'type': 'TIMESTAMP', 'mode': 'REQUIRED'},
+    {'name': 'event_date', 'type': 'DATE', 'mode': 'REQUIRED'},
+    {'name': 'payload', 'type': 'JSON', 'mode': 'NULLABLE'},
+    {'name': 'public', 'type': 'BOOLEAN', 'mode': 'REQUIRED'},
+    {'name': 'loaded_at', 'type': 'TIMESTAMP', 'mode': 'REQUIRED'},
+]
+
 # CRITICAL: source_objects must match the transform_data task's output.
 # Transform task outputs: 'transformed/*.json.gz'
 load_task = GCSToBigQueryOperator(
@@ -519,12 +570,12 @@ load_task = GCSToBigQueryOperator(
     bucket=GCS_BUCKET,
     source_objects=['transformed/*.json.gz'],
     destination_project_dataset_table=f'{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}',
+    schema_fields=BQ_SCHEMA,
     source_format='NEWLINE_DELIMITED_JSON',
     write_disposition='WRITE_APPEND',
+    create_disposition='CREATE_IF_NEEDED',
     max_bad_records=100,
     allow_quoted_newlines=True,
-    # Use existing table schema - do NOT autodetect (prevents type inference errors)
-    autodetect=False,
     dag=dag,
 )
 

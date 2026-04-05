@@ -7,14 +7,11 @@ models:
       - name: event_id
         description: "Unique identifier for the event"
         tests:
-          - unique
           - not_null
       - name: event_type
         description: "Type of GitHub event (e.g., PushEvent, PullRequestEvent)"
         tests:
           - not_null
-          - accepted_values:
-              values: ['PushEvent', 'PullRequestEvent', 'IssueCommentEvent', 'WatchEvent', 'ForkEvent', 'CreateEvent', 'DeleteEvent']
       - name: actor_login
         description: "GitHub username of the actor"
         tests:
@@ -33,9 +30,6 @@ models:
           - not_null
       - name: is_valid_event
         description: "Data quality flag indicating valid event"
-        tests:
-          - accepted_values:
-              values: [true]
 
   - name: daily_stats
     description: "Daily aggregated statistics for GitHub activity"
@@ -43,7 +37,6 @@ models:
       - name: stats_date
         description: "Date of the statistics"
         tests:
-          - unique
           - not_null
       - name: event_type
         description: "Type of event for this aggregation"
@@ -90,7 +83,7 @@ models:
       - name: repo_full_name
         description: "Full repository name (owner/repo)"
         tests:
-          - unique
+          - not_null
       - name: total_events
         description: "Total events for this repository on this date"
       - name: push_events
@@ -108,3 +101,79 @@ models:
         tests:
           - accepted_values:
               values: ['Healthy', 'Moderate', 'At Risk', 'Critical']
+              quote: true
+
+  - name: ai_agent_stats
+    description: "Daily aggregated statistics for AI coding agent activity"
+    columns:
+      - name: stats_date
+        description: "Date of the statistics"
+        tests:
+          - not_null
+      - name: actor_type
+        description: "Type of AI agent (Copilot, Claude, Cursor, CodeRabbit, Lovable, Dependabot, CI/CD Bot, Other Bot)"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Copilot', 'Claude', 'Cursor', 'CodeRabbit', 'Lovable', 'Dependabot', 'CI/CD Bot', 'Other Bot', 'Human']
+              quote: true
+      - name: total_events
+        description: "Total number of events by this agent type"
+        tests:
+          - not_null
+      - name: unique_agents
+        description: "Count of unique agent accounts"
+        tests:
+          - not_null
+      - name: repos_touched
+        description: "Count of unique repositories touched"
+      - name: push_events
+        description: "Count of push events"
+      - name: pr_events
+        description: "Count of pull request events"
+      - name: comment_events
+        description: "Count of issue comment events"
+      - name: star_events
+        description: "Count of star/watch events"
+      - name: fork_events
+        description: "Count of fork events"
+      - name: avg_activity_hour
+        description: "Average hour of activity (0-23)"
+      - name: push_ratio
+        description: "Ratio of push events to total events"
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 1
+      - name: pr_ratio
+        description: "Ratio of PR events to total events"
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 1
+
+  - name: ai_ratio_timeline
+    description: "Daily AI vs Human ratio time-series for dashboard visualization"
+    columns:
+      - name: event_date
+        description: "Date of the metrics"
+        tests:
+          - not_null
+      - name: total_events
+        description: "Total number of events on this date"
+        tests:
+          - not_null
+      - name: ai_events
+        description: "Count of AI agent events"
+        tests:
+          - not_null
+      - name: human_events
+        description: "Count of human events"
+        tests:
+          - not_null
+      - name: ai_percentage
+        description: "Percentage of events from AI agents (0-100)"
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100

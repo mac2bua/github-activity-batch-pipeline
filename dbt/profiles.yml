@@ -4,7 +4,7 @@ github_activity:
     dev:
       type: bigquery
       method: service-account
-      project: "{{ env_var('GCP_PROJECT_ID') }}"
-      dataset: "{{ env_var('BQ_DATASET', 'gh_activity_dev') }}"
+      project: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"
+      dataset: "{{ env_var('BQ_DATASET', 'github_activity') }}"
       keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"
-      location: "{{ env_var('GCP_REGION', 'us-central1') }}"
+      location: "{{ env_var('GCP_REGION', 'europe-west1') }}"

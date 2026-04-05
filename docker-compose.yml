@@ -41,12 +41,14 @@ services:
       AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
       AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
       AIRFLOW__CORE__GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
       GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp_credentials.json
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - ${GOOGLE_APPLICATION_CREDENTIALS}:/opt/airflow/gcp_credentials.json:ro
+      - github_archive_data:/tmp/github_archive
     user: "${AIRFLOW_UID:-50000}:0"
     ports:
       - "8080:8080"
@@ -77,12 +79,14 @@ services:
       AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
       AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
       AIRFLOW__CORE__GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
       GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp_credentials.json
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - ${GOOGLE_APPLICATION_CREDENTIALS}:/opt/airflow/gcp_credentials.json:ro
+      - github_archive_data:/tmp/github_archive
     user: "${AIRFLOW_UID:-50000}:0"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
@@ -111,12 +115,14 @@ services:
       AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
       AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
       AIRFLOW__CORE__GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
       GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp_credentials.json
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - ${GOOGLE_APPLICATION_CREDENTIALS}:/opt/airflow/gcp_credentials.json:ro
+      - github_archive_data:/tmp/github_archive
     user: "${AIRFLOW_UID:-50000}:0"
     healthcheck:
       test:
@@ -155,6 +161,7 @@ services:
 
 volumes:
   postgres-db-volume:
+  github_archive_data:
 
 networks:
   default:

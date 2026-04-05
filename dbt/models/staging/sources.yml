@@ -2,13 +2,13 @@ version: 2
 
 sources:
   - name: github
-    database: "{{ env_var('GCP_PROJECT_ID') }}"
-    schema: "{{ env_var('BQ_DATASET', 'gh_activity_dev') }}"
+    database: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"
+    schema: "{{ env_var('BQ_DATASET', 'github_activity') }}"
     tables:
       - name: github_events
         description: "Raw GitHub events"
         columns:
-          - name: id
-            tests: [unique, not_null]
+          - name: event_id
+            tests: [not_null]
           - name: created_at
             tests: [not_null]

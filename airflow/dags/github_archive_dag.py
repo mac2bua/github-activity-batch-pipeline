@@ -46,9 +46,9 @@ dag = DAG(
     'github_archive_batch_pipeline',
     default_args=DEFAULT_ARGS,
     description='Batch processing pipeline for GitHub Archive data',
-    schedule_interval='@daily',
-    start_date=datetime(2026, 1, 1),
-    catchup=True,
+    schedule_interval=None,  # Disabled - manual triggers only for testing
+    start_date=datetime(2024, 6, 1),
+    catchup=False,  # Disabled to prevent backlog during testing
     max_active_runs=1,
     tags=['github', 'batch', 'zoomcamp'],
 )
@@ -83,7 +83,13 @@ def download_github_archive(**context: Any) -> str:
 
     logger.info("Starting download for date: %s", date_str)
 
-    for hour in range(24):
+    # TEST MODE: Download only 1 hour for fast end-to-end testing (< 5 minutes)
+    # Set to False for production runs (all 24 hours)
+    TEST_MODE = True
+    test_hours = [12]  # Just hour 12 (noon) for testing
+    hours_to_download = test_hours if TEST_MODE else range(24)
+
+    for hour in hours_to_download:
         hour_str = f"{hour:02d}"
         filename = f"{date_str}-{hour_str}.json.gz"
         url = f"{base_url}/{filename}"
@@ -162,47 +168,6 @@ def upload_to_gcs(**context: Any) -> str:
     return f"Uploaded {len(uploaded_files)} files to GCS"
 
 
-def load_to_bigquery(**context: Any) -> dict[str, Any]:
-    """
-    Load data from GCS to BigQuery using MERGE for deduplication.
-
-    Constructs a BigQuery MERGE statement that inserts new records
-    from the gharchive.day table while avoiding duplicates.
-
-    Args:
-        **context: Airflow context containing execution_date.
-
-    Returns:
-        dict: BigQuery job configuration with the MERGE query.
-    """
-    execution_date = context['execution_date']
-    date_str = execution_date.strftime('%Y-%m-%d')
-
-    query = f"""
-    MERGE `{BQ_DATASET}.{BQ_TABLE}` T
-    USING (
-      SELECT * FROM `gharchive.day.{date_str}`
-    ) S
-    ON T.id = S.id
-    WHEN NOT MATCHED THEN INSERT (
-        id, type, actor_login, repo_name, action,
-        created_at, date_partition, payload, org_login, file_url
-    )
-    VALUES (
-        S.id, S.type, S.actor.login, S.repo.name, S.action,
-        S.created_at, DATE(S.created_at), TO_JSON_STRING(S.payload),
-        S.org.login, ''
-    )
-    """
-
-    logger.info("Executing BigQuery MERGE for date: %s", date_str)
-
-    return {
-        "query": query,
-        "useLegacySql": False
-    }
-
-
 # Define tasks
 download_task = PythonOperator(
     task_id='download_github_archive',
@@ -216,9 +181,61 @@ upload_task = PythonOperator(
     dag=dag,
 )
 
+# Load from GCS to BigQuery using external table approach
+# First create an external table from GCS, then merge into the target table
+LOAD_QUERY = """
+-- Create or replace external table from GCS files
+CREATE OR REPLACE EXTERNAL TABLE `{{ params.dataset }}.staging_{{ params.table }}_{{ ds_nodash }}`
+OPTIONS (
+  format = 'JSON',
+  compression = 'GZIP',
+  uris = ['gs://{{ params.bucket }}/data/{{ ds }}*.json.gz']
+);
+
+-- Merge into target table with deduplication
+MERGE `{{ params.dataset }}.{{ params.table }}` T
+USING (
+  SELECT DISTINCT
+    id,
+    type,
+    actor.login as actor_login,
+    repo.name as repo_name,
+    action,
+    created_at,
+    DATE(created_at) as date_partition,
+    TO_JSON_STRING(payload) as payload,
+    org.login as org_login,
+    '' as file_url
+  FROM `{{ params.dataset }}.staging_{{ params.table }}_{{ ds_nodash }}`
+  WHERE id IS NOT NULL
+) S
+ON T.id = S.id
+WHEN NOT MATCHED THEN INSERT (
+    id, type, actor_login, repo_name, action,
+    created_at, date_partition, payload, org_login, file_url
+)
+VALUES (
+    S.id, S.type, S.actor_login, S.repo_name, S.action,
+    S.created_at, S.date_partition, S.payload, S.org_login, S.file_url
+);
+
+-- Drop the staging table
+DROP EXTERNAL TABLE IF EXISTS `{{ params.dataset }}.staging_{{ params.table }}_{{ ds_nodash }}`;
+"""
+
 load_task = BigQueryInsertJobOperator(
     task_id='load_to_bigquery',
-    configuration={'query': load_to_bigquery},
+    configuration={
+        'query': {
+            'query': LOAD_QUERY,
+            'useLegacySql': False,
+        }
+    },
+    params={
+        'dataset': BQ_DATASET,
+        'table': BQ_TABLE,
+        'bucket': GCS_BUCKET,
+    },
     dag=dag,
 )
 

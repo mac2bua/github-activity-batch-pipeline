@@ -39,24 +39,3 @@ models:
           data_type: date
           granularity: day
         +cluster_by: ['repo_owner', 'repo_name']
-
-sources:
-  github_activity:
-    database: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"
-    schema: "github_activity"
-    tables:
-      - name: github_events
-        description: "Raw GitHub events from Airflow pipeline"
-        columns:
-          - name: event_id
-            description: "Unique event identifier"
-          - name: event_type
-            description: "Type of GitHub event"
-          - name: actor_login
-            description: "GitHub user login"
-          - name: repo_name
-            description: "Full repository name"
-          - name: created_at
-            description: "Event timestamp"
-          - name: event_date
-            description: "Partition date"
