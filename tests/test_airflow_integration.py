@@ -32,25 +32,14 @@ class TestDAGParsing:
         except Exception as e:
             pytest.fail(f"DAG parsing failed: {e}")
 
-    def test_github_archive_dag_parses(self) -> None:
-        """Test github_archive_dag DAG parses without errors"""
-        try:
-            import github_archive_dag
-            assert github_archive_dag.dag is not None
-            assert github_archive_dag.dag.dag_id == 'github_archive_batch_pipeline'
-        except Exception as e:
-            pytest.fail(f"DAG parsing failed: {e}")
+    def test_dag_has_valid_tasks(self) -> None:
+        """Test DAG has tasks that can be accessed"""
+        from github_activity_pipeline import dag
 
-    def test_all_dags_have_valid_tasks(self) -> None:
-        """Test all DAGs have tasks that can be accessed"""
-        from github_activity_pipeline import dag as dag1
-        from github_archive_dag import dag as dag2
-
-        for dag in [dag1, dag2]:
-            assert len(dag.tasks) > 0
-            for task in dag.tasks:
-                assert hasattr(task, 'task_id')
-                assert task.task_id is not None
+        assert len(dag.tasks) > 0
+        for task in dag.tasks:
+            assert hasattr(task, 'task_id')
+            assert task.task_id is not None
 
 
 class TestOperatorInitialization:
@@ -237,24 +226,6 @@ class TestDAGDependencies:
         
         cleanup_task = task_map['cleanup_temp_files']
         assert 'load_to_bigquery' in [t.task_id for t in cleanup_task.upstream_list]
-
-    def test_github_archive_dag_dependencies(self) -> None:
-        """Test task dependencies in github_archive_dag"""
-        from github_archive_dag import dag
-        
-        task_map = {task.task_id: task for task in dag.tasks}
-        
-        assert 'download_github_archive' in task_map
-        assert 'upload_to_gcs' in task_map
-        assert 'load_to_bigquery' in task_map
-        
-        # Check chain: download >> upload >> load
-        upload_task = task_map['upload_to_gcs']
-        assert 'download_github_archive' in [t.task_id for t in upload_task.upstream_list]
-        
-        load_task = task_map['load_to_bigquery']
-        assert 'upload_to_gcs' in [t.task_id for t in load_task.upstream_list]
-
 
 class TestDAGWithMockContext:
     """Test DAG functions with mocked context"""

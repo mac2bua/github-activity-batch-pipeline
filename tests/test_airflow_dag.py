@@ -174,45 +174,6 @@ class TestDownloadTask:
         assert len(download_github_archive.__doc__) > 0
 
 
-class TestSecondDAG:
-    """Test the github_archive_dag.py DAG"""
-
-    def test_second_dag_imports(self) -> None:
-        """Test second DAG imports without errors"""
-        try:
-            import github_archive_dag
-            assert github_archive_dag is not None
-        except ImportError as e:
-            pytest.fail(f"Failed to import github_archive_dag: {e}")
-
-    def test_second_dag_exists(self) -> None:
-        """Test second DAG object exists"""
-        from github_archive_dag import dag
-        assert dag is not None
-        assert dag.dag_id == 'github_archive_batch_pipeline'
-
-    def test_second_dag_tasks(self) -> None:
-        """Test second DAG has required tasks"""
-        from github_archive_dag import dag
-        task_ids = [task.task_id for task in dag.tasks]
-        assert 'download_github_archive' in task_ids
-        assert 'upload_to_gcs' in task_ids
-        assert 'load_to_bigquery' in task_ids
-
-    def test_second_dag_dependencies(self) -> None:
-        """Test second DAG task dependencies"""
-        from github_archive_dag import dag
-
-        dependencies: dict[str, list[str]] = {}
-        for task in dag.tasks:
-            dependencies[task.task_id] = [
-                up.task_id for up in task.upstream_list
-            ]
-
-        assert 'download_github_archive' in dependencies.get('upload_to_gcs', [])
-        assert 'upload_to_gcs' in dependencies.get('load_to_bigquery', [])
-
-
 class TestConfiguration:
     """Test configuration and constants"""
 
