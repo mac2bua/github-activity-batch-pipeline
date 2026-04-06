@@ -152,7 +152,7 @@ def download_github_archive(**context: Any) -> str:
 
     # TEST MODE: Only download 1 hour to keep pipeline fast (2-5 min total)
     # Change to range(24) for production runs
-    test_hours = [12]  # Just hour 12 (noon) - usually has data
+    test_hours = range(24)  # All 24 hours for meaningful hourly heatmap
 
     for hour in test_hours:
         hour_str = f"{hour:02d}"

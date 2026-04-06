@@ -86,7 +86,7 @@ def download_github_archive(**context: Any) -> str:
     # TEST MODE: Download only 1 hour for fast end-to-end testing (< 5 minutes)
     # Set to False for production runs (all 24 hours)
     TEST_MODE = True
-    test_hours = [12]  # Just hour 12 (noon) for testing
+    test_hours = range(24)  # All 24 hours for meaningful hourly heatmap
     hours_to_download = test_hours if TEST_MODE else range(24)
 
     for hour in hours_to_download:
