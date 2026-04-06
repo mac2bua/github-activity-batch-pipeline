@@ -1,21 +1,19 @@
 # Python dependencies for GitHub Activity Batch Pipeline
 # Compatible with Python 3.9-3.12
 
-# Airflow (use latest 2.x compatible with your Python version)
+# Airflow (needed for local DAG testing; production runs apache/airflow:2.8.0 in Docker)
 apache-airflow==2.11.1
 apache-airflow-providers-google==11.0.0
 
 # dbt
-dbt-bigquery==1.9.0
+dbt-bigquery>=1.9.0
 
 # Testing
-pytest==8.3.5
-pytest-cov==6.0.0
+pytest>=7.0.0
+pytest-cov>=4.0.0
 
 # Data processing
-requests==2.32.3
-pandas==2.2.3
+requests>=2.32.0
 
 # Utilities
-python-dotenv==1.0.1
-cryptography==44.0.0
+python-dotenv>=1.0.0

@@ -57,11 +57,14 @@ make airflow-up
 ### 5. Set Up dbt
 
 ```bash
-# Create virtual environment and install dbt
+# Create virtual environment for dbt (separate from Airflow which runs in Docker)
 python3 -m venv .venv
 source .venv/bin/activate
-pip install dbt-bigquery
+pip install -r requirements.txt  # Installs dbt-bigquery + pytest
 ```
+
+**Note:** Airflow runs in Docker with the official `apache/airflow:2.8.0` image.
+The `requirements.txt` is for local dbt transformations and testing only.
 
 ### 6. Run Pipeline
 
@@ -163,6 +166,8 @@ Verify: `bq query "SELECT * FROM github_activity.ai_agent_stats LIMIT 10"`
 | AI vs Human Ratio | Gauge | ai_agent_stats | ai_events/total_events |
 | Event Type Breakdown | Stacked Bar | ai_agent_stats | actor_type, push/pr/comment/star events |
 | Activity Heatmap | Grid | stg_github_events | HOUR(created_at), actor_type, COUNT(*) |
+
+**[View Live Dashboard](https://lookerstudio.google.com/reporting/5417917d-21ab-43c6-bf16-c1a13d8976af)**
 
 ![Dashboard](images/github_ai_activity_dashboard.png)
 

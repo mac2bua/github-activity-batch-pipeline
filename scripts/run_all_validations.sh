@@ -1,5 +1,7 @@
 #!/bin/bash
 # Run all validations for the GitHub Activity Batch Pipeline
+# Compatible with bash 3.2+ (macOS)
+
 set -e
 
 echo "╔══════════════════════════════════════════════════════════╗"
@@ -7,19 +9,27 @@ echo "║  GitHub Activity Batch Pipeline - Validation Suite      ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
-SCRIPT_DIR="$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Track validation results
-declare -A results
+# Track validation results (using simple variables for bash 3.2 compatibility)
+RESULT_TERRAFORM=""
+RESULT_AIRFLOW=""
+RESULT_DBT=""
+RESULT_DOCKER=""
+RESULT_README=""
+PASS_COUNT=0
+TOTAL=5
 
 # Validate Terraform
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "1️⃣  TERRAFORM VALIDATION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if bash "$SCRIPT_DIR/validate_terraform.sh"; then
-    results[terraform]="✅ PASS"
+    RESULT_TERRAFORM="✅ PASS"
+    PASS_COUNT=$((PASS_COUNT + 1))
 else
-    results[terraform]="❌ FAIL"
+    RESULT_TERRAFORM="❌ FAIL"
 fi
 echo ""
 
@@ -28,9 +38,10 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "2️⃣  AIRFLOW VALIDATION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if bash "$SCRIPT_DIR/validate_airflow.sh"; then
-    results[airflow]="✅ PASS"
+    RESULT_AIRFLOW="✅ PASS"
+    PASS_COUNT=$((PASS_COUNT + 1))
 else
-    results[airflow]="❌ FAIL"
+    RESULT_AIRFLOW="❌ FAIL"
 fi
 echo ""
 
@@ -39,9 +50,10 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "3️⃣  DBT VALIDATION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if bash "$SCRIPT_DIR/validate_dbt.sh"; then
-    results[dbt]="✅ PASS"
+    RESULT_DBT="✅ PASS"
+    PASS_COUNT=$((PASS_COUNT + 1))
 else
-    results[dbt]="❌ FAIL"
+    RESULT_DBT="❌ FAIL"
 fi
 echo ""
 
@@ -49,23 +61,24 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "4️⃣  DOCKER COMPOSE VALIDATION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if [ -f "$(dirname "$0")/../docker-compose.yml" ]; then
+if [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
     echo "✅ docker-compose.yml found"
     if command -v docker &> /dev/null; then
-        docker compose config --quiet && {
+        if docker compose config --quiet 2>/dev/null; then
             echo "✅ Docker Compose syntax valid"
-            results[docker]="✅ PASS"
-        } || {
+            RESULT_DOCKER="✅ PASS"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        else
             echo "❌ Docker Compose syntax error"
-            results[docker]="❌ FAIL"
-        }
+            RESULT_DOCKER="❌ FAIL"
+        fi
     else
         echo "ℹ️  Docker not installed, skipping config validation"
-        results[docker]="⚠️  SKIP"
+        RESULT_DOCKER="⚠️  SKIP"
     fi
 else
     echo "❌ docker-compose.yml not found"
-    results[docker]="❌ FAIL"
+    RESULT_DOCKER="❌ FAIL"
 fi
 echo ""
 
@@ -73,20 +86,21 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "5️⃣  DOCUMENTATION CHECK"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if [ -f "$(dirname "$0")/../README.md" ]; then
+if [ -f "$PROJECT_DIR/README.md" ]; then
     echo "✅ README.md found"
-    word_count=$(wc -w < "$(dirname "$0")/../README.md")
+    word_count=$(wc -w < "$PROJECT_DIR/README.md" | tr -d ' ')
     echo "   Word count: $word_count"
-    if [ $word_count -gt 500 ]; then
+    if [ "$word_count" -gt 500 ]; then
         echo "   ✅ README is comprehensive"
-        results[readme]="✅ PASS"
+        RESULT_README="✅ PASS"
+        PASS_COUNT=$((PASS_COUNT + 1))
     else
         echo "   ⚠️  README may be too short"
-        results[readme]="⚠️  WARN"
+        RESULT_README="⚠️  WARN"
     fi
 else
     echo "❌ README.md not found"
-    results[readme]="❌ FAIL"
+    RESULT_README="❌ FAIL"
 fi
 echo ""
 
@@ -95,25 +109,15 @@ echo "╔═══════════════════════�
 echo "║  VALIDATION SUMMARY                                      ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
-printf "%-20s %s\n" "Terraform:" "${results[terraform]}"
-printf "%-20s %s\n" "Airflow:" "${results[airflow]}"
-printf "%-20s %s\n" "dbt:" "${results[dbt]}"
-printf "%-20s %s\n" "Docker Compose:" "${results[docker]}"
-printf "%-20s %s\n" "Documentation:" "${results[readme]}"
+printf "%-20s %s\n" "Terraform:" "$RESULT_TERRAFORM"
+printf "%-20s %s\n" "Airflow:" "$RESULT_AIRFLOW"
+printf "%-20s %s\n" "dbt:" "$RESULT_DBT"
+printf "%-20s %s\n" "Docker Compose:" "$RESULT_DOCKER"
+printf "%-20s %s\n" "Documentation:" "$RESULT_README"
 echo ""
+echo "Passed: $PASS_COUNT/$TOTAL"
 
-# Count passes
-pass_count=0
-for result in "${results[@]}"; do
-    if [[ "$result" == *"PASS"* ]]; then
-        pass_count=$((pass_count + 1))
-    fi
-done
-
-total=${#results[@]}
-echo "Passed: $pass_count/$total"
-
-if [ $pass_count -eq $total ]; then
+if [ $PASS_COUNT -eq $TOTAL ]; then
     echo "🎉 All validations passed!"
     exit 0
 else

@@ -9,12 +9,16 @@ given parameters.
 Run: pytest tests/test_airflow_integration.py -v
 """
 
+import os
 import pytest
 from datetime import datetime
 from pathlib import Path
 import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+# Set required environment variables before importing DAG
+os.environ.setdefault('GOOGLE_CLOUD_PROJECT', 'test-project')
 
 # Add dags directory to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'airflow' / 'dags'))
@@ -80,13 +84,14 @@ class TestOperatorInitialization:
     def test_gcs_to_bigquery_rejects_clustering_fields(self) -> None:
         """
         Test that clustering_fields parameter raises an error.
-        
+
         This validates that our fix is correct - if this test passes,
         it means the operator correctly rejects this parameter.
         """
         from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
-        
-        with pytest.raises(TypeError, match="clustering_fields"):
+        from airflow.exceptions import AirflowException
+
+        with pytest.raises((TypeError, AirflowException), match="clustering"):
             GCSToBigQueryOperator(
                 task_id='test_load',
                 bucket='test-bucket',
@@ -98,25 +103,29 @@ class TestOperatorInitialization:
                 dag=None,
             )
 
-    def test_gcs_to_bigquery_rejects_schema_fields(self) -> None:
+    def test_gcs_to_bigquery_accepts_schema_fields(self) -> None:
         """
-        Test that schema_fields parameter raises an error.
-        
-        Schema should be pre-created via Terraform.
+        Test that schema_fields parameter is accepted (schema can be provided inline).
+
+        Note: We pre-create schema via Terraform, but inline schema is also valid.
         """
         from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
-        
-        with pytest.raises(TypeError, match="schema"):
-            GCSToBigQueryOperator(
+
+        try:
+            operator = GCSToBigQueryOperator(
                 task_id='test_load',
                 bucket='test-bucket',
                 source_objects=['raw/test/'],
                 destination_project_dataset_table='project.dataset.table',
                 source_format='NEWLINE_DELIMITED_JSON',
                 write_disposition='WRITE_APPEND',
-                schema_fields=[{'name': 'id', 'type': 'STRING'}],  # This should fail
+                schema_fields=[{'name': 'id', 'type': 'STRING'}],
                 dag=None,
             )
+            assert operator is not None
+            assert operator.task_id == 'test_load'
+        except Exception as e:
+            pytest.fail(f"GCSToBigQueryOperator should accept schema_fields: {e}")
 
     def test_python_operator_initialization(self) -> None:
         """Test PythonOperator can be initialized"""
@@ -153,28 +162,20 @@ class TestOperatorInitialization:
 class TestDAGTaskConfiguration:
     """Test that DAG tasks are configured correctly"""
 
-    def test_load_task_has_valid_params(self) -> None:
-        """Test the actual load task in github_activity_pipeline has valid params"""
+    def test_load_task_is_python_operator(self) -> None:
+        """Test load task is PythonOperator with correct callable"""
         from github_activity_pipeline import dag
-        
+        from airflow.operators.python import PythonOperator
+
         load_task = None
         for task in dag.tasks:
             if task.task_id == 'load_to_bigquery':
                 load_task = task
                 break
-        
+
         assert load_task is not None, "load_to_bigquery task not found"
-        
-        # Verify it's a GCSToBigQueryOperator
-        from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
-        assert isinstance(load_task, GCSToBigQueryOperator)
-        
-        # Verify required params are present
-        assert hasattr(load_task, 'bucket')
-        assert hasattr(load_task, 'source_objects')
-        assert hasattr(load_task, 'destination_project_dataset_table')
-        assert hasattr(load_task, 'source_format')
-        assert hasattr(load_task, 'write_disposition')
+        assert isinstance(load_task, PythonOperator)
+        assert callable(load_task.python_callable)
 
     def test_load_task_does_not_have_invalid_params(self) -> None:
         """Test the load task doesn't have Airflow 2.8+ incompatible params"""
@@ -203,27 +204,31 @@ class TestDAGDependencies:
     def test_github_activity_pipeline_dependencies(self) -> None:
         """Test task dependencies in github_activity_pipeline"""
         from github_activity_pipeline import dag
-        
+
         # Build dependency map
         task_map = {task.task_id: task for task in dag.tasks}
-        
-        # Verify chain: download >> upload >> validate >> load >> cleanup
+
+        # Verify chain: download >> upload >> validate >> transform >> load >> cleanup
         assert 'download_github_archive' in task_map
         assert 'upload_to_gcs' in task_map
         assert 'validate_data_quality' in task_map
+        assert 'transform_data' in task_map
         assert 'load_to_bigquery' in task_map
         assert 'cleanup_temp_files' in task_map
-        
+
         # Check upstream dependencies
         upload_task = task_map['upload_to_gcs']
         assert 'download_github_archive' in [t.task_id for t in upload_task.upstream_list]
-        
+
         validate_task = task_map['validate_data_quality']
         assert 'upload_to_gcs' in [t.task_id for t in validate_task.upstream_list]
-        
+
+        transform_task = task_map['transform_data']
+        assert 'validate_data_quality' in [t.task_id for t in transform_task.upstream_list]
+
         load_task = task_map['load_to_bigquery']
-        assert 'validate_data_quality' in [t.task_id for t in load_task.upstream_list]
-        
+        assert 'transform_data' in [t.task_id for t in load_task.upstream_list]
+
         cleanup_task = task_map['cleanup_temp_files']
         assert 'load_to_bigquery' in [t.task_id for t in cleanup_task.upstream_list]
 

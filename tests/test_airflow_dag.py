@@ -7,11 +7,15 @@ basic functionality validation.
 Run: pytest tests/test_airflow_dag.py -v
 """
 
+import os
 import pytest
 from datetime import datetime
 from pathlib import Path
 import sys
 from typing import Any
+
+# Set required environment variables before importing DAG
+os.environ.setdefault('GOOGLE_CLOUD_PROJECT', 'test-project')
 
 # Add dags directory to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'airflow' / 'dags'))
@@ -44,10 +48,10 @@ class TestDAGStructure:
         from github_activity_pipeline import dag
         assert dag.schedule_interval == '@daily'
 
-    def test_catchup_enabled(self) -> None:
-        """Test catchup is enabled for backfill"""
+    def test_catchup_disabled(self) -> None:
+        """Test catchup is disabled for E2E testing"""
         from github_activity_pipeline import dag
-        assert dag.catchup is True
+        assert dag.catchup is False
 
     def test_max_active_runs(self) -> None:
         """Test only one run at a time"""
@@ -127,8 +131,11 @@ class TestTasks:
         # Check validate depends on upload
         assert 'upload_to_gcs' in dependencies.get('validate_data_quality', [])
 
-        # Check load depends on validate
-        assert 'validate_data_quality' in dependencies.get('load_to_bigquery', [])
+        # Check transform depends on validate
+        assert 'validate_data_quality' in dependencies.get('transform_data', [])
+
+        # Check load depends on transform
+        assert 'transform_data' in dependencies.get('load_to_bigquery', [])
 
         # Check cleanup depends on load (last task)
         assert 'load_to_bigquery' in dependencies.get('cleanup_temp_files', [])
@@ -196,7 +203,7 @@ class TestConfiguration:
     def test_archive_url_configured(self) -> None:
         """Test GHE Archive URL is configured"""
         from github_activity_pipeline import GHE_ARCHIVE_URL
-        assert GHE_ARCHIVE_URL == 'https://gharchive.org'
+        assert GHE_ARCHIVE_URL == 'https://data.gharchive.org'
 
 
 if __name__ == '__main__':

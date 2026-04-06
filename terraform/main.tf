@@ -70,11 +70,12 @@ resource "google_bigquery_table" "github_events" {
 EOF
 
   time_partitioning {
-    type                     = "DAY"
-    field                    = "event_date"
-    expiration_ms            = 7776000000  # 90 days
-    require_partition_filter = false
+    type          = "DAY"
+    field         = "event_date"
+    expiration_ms = 7776000000 # 90 days
   }
+
+  require_partition_filter = true
 
   clustering = ["repo_name", "actor_login", "event_type"]
 
