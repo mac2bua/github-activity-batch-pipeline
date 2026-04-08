@@ -548,6 +548,8 @@ If a date has no data in BigQuery (e.g., GH Archive delay):
 
 If the same date was loaded twice (duplicate records):
 
+**Note**: A data duplication bug was fixed in April 2026 that caused hour 11 data to be processed multiple times when early hours (0-10) returned 404. The fix ensures each hourly file is only processed once.
+
 1. **Delete duplicates from BigQuery**:
    ```bash
    bq query --use_legacy_sql=false \
@@ -565,6 +567,18 @@ If the same date was loaded twice (duplicate records):
    bq query --use_legacy_sql=false \
      "SELECT event_date, COUNT(*) as events FROM github_activity.github_events
       WHERE event_date >= '2026-04-01' GROUP BY event_date ORDER BY event_date"
+   ```
+
+4. **Check for duplicate records** (if you suspect data corruption):
+   ```bash
+   # Find duplicate event_ids
+   bq query --use_legacy_sql=false \
+     "SELECT event_date, event_id, COUNT(*) as dup_count
+      FROM github_activity.github_events
+      WHERE event_date = '2026-04-05'
+      GROUP BY event_date, event_id
+      HAVING COUNT(*) > 1
+      LIMIT 100"
    ```
 
 ### Query Data by Date

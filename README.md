@@ -237,6 +237,14 @@ AIRFLOW__CORE__FERNET_KEY=$(python3 -c "from cryptography.fernet import Fernet; 
    EOF
    ```
 
+4. Load environment variables for dbt:
+
+   ```bash
+   set -a && source .env && set +a
+   ```
+
+   This exports the `.env` variables to your shell so dbt can read them. The project's `dbt/profiles.yml` and `dbt/models/staging/sources.yml` use `{{ env_var('GOOGLE_CLOUD_PROJECT') }}` which requires the variable to be exported.
+
 **Note:** Airflow runs in Docker with the official `apache/airflow:2.8.0` image.
 The `requirements.txt` is for local dbt transformations and testing only.
 
@@ -362,6 +370,7 @@ make deploy
 | DAG not appearing | `docker compose restart airflow-scheduler` |
 | Auth errors | Check `GOOGLE_APPLICATION_CREDENTIALS` path in `.env` |
 | BigQuery schema errors | Table pre-created by Terraform; use `autodetect=False` |
+| dbt env var error | Run `set -a && source .env && set +a` before dbt commands |
 | dbt won't run | Ensure Python 3.12-3.13 (not 3.14+) |
 
 See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for detailed solutions.

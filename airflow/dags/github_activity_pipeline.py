@@ -159,11 +159,19 @@ def download_github_archive(**context: Any) -> str:
     # Change to range(24) for production runs
     test_hours = range(24)  # All 24 hours for meaningful hourly heatmap
 
+    # Track which files we've already downloaded to prevent duplicates
+    downloaded_filenames: set[str] = set()
+
     for hour in test_hours:
         hour_str = f"{hour:02d}"
         filename = f"{date_str}-{hour_str}.json.gz"
         url = f"{GHE_ARCHIVE_URL}/{filename}"
         local_path = DATA_DIR / filename
+
+        # Skip if we already downloaded this file (prevents duplicate processing)
+        if filename in downloaded_filenames:
+            logger.warning("Skipping duplicate download for hour %d (already have this file)", hour)
+            continue
 
         try:
             response = requests.get(url, timeout=30)
@@ -171,25 +179,14 @@ def download_github_archive(**context: Any) -> str:
             with open(local_path, 'wb') as f:
                 f.write(response.content)
             downloaded_files.append(str(local_path))
+            downloaded_filenames.add(filename)
             logger.info("Downloaded: %s (%.2f KB)", filename, len(response.content) / 1024)
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
-                logger.warning("File not available: %s (404) - trying hour 11", filename)
-                # Try hour 11 as fallback
-                hour_str = "11"
-                filename = f"{date_str}-{hour_str}.json.gz"
-                url = f"{GHE_ARCHIVE_URL}/{filename}"
-                local_path = DATA_DIR / filename
-                try:
-                    response = requests.get(url, timeout=30)
-                    response.raise_for_status()
-                    with open(local_path, 'wb') as f:
-                        f.write(response.content)
-                    downloaded_files.append(str(local_path))
-                    logger.info("Downloaded fallback: %s (%.2f KB)", filename, len(response.content) / 1024)
-                except Exception as fallback_e:
-                    logger.warning("Fallback also failed: %s", fallback_e)
-                    failed_downloads.append((filename, str(fallback_e)))
+                # GH Archive files often don't exist for early hours on recent dates
+                # This is normal - don't download hour 11 as fallback (causes data duplication)
+                logger.warning("File not available: %s (404) - skipping this hour", filename)
+                failed_downloads.append((filename, "404 - file not available on GH Archive"))
             else:
                 logger.warning("HTTP error for %s: %s", filename, e)
                 failed_downloads.append((filename, str(e)))
@@ -433,8 +430,9 @@ def transform_ghe_to_schema(**context: Any) -> str:
     logger.info("Filtering files for execution_date=%s, prefix=%s", date_str, f'data/{date_str}-')
 
     if not blob_names:
-        logger.warning("No source files found in GCS")
-        return "No files to transform"
+        error_msg = f"No source files found in GCS for date {date_str}. Check if download task completed successfully."
+        logger.error(error_msg)
+        raise ValueError(error_msg)
 
     transformed_files = []
     total_records = 0
@@ -600,6 +598,18 @@ def load_to_bigquery_date_specific(**context: Any) -> str:
     delete_job.result()  # Wait for completion
     logger.info("Deleted %d rows for date=%s", delete_job.num_dml_affected_rows, date_str)
 
+    # Verify transformed files exist before attempting load
+    hook = GCSHook()
+    transformed_files = list(hook.list(
+        bucket_name=GCS_BUCKET,
+        prefix=f'transformed/{date_str}-'
+    ))
+    if not transformed_files:
+        error_msg = f"No transformed files found in GCS for date {date_str}. Transform task may have failed."
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    logger.info("Found %d transformed files for date %s", len(transformed_files), date_str)
+
     # Only load files for this execution_date
     source_objects = [f'transformed/{date_str}-*.json.gz']
 
@@ -618,7 +628,23 @@ def load_to_bigquery_date_specific(**context: Any) -> str:
         allow_quoted_newlines=True,
     )
 
-    return load_operator.execute(context=context)
+    result = load_operator.execute(context=context)
+
+    # Verify rows were actually loaded
+    count_query = f"""
+        SELECT COUNT(*) as row_count
+        FROM `{table_id}`
+        WHERE event_date = '{date_str}'
+    """
+    count_job = client.query(count_query)
+    count_result = list(count_job.result())
+    row_count = count_result[0][0]
+
+    if row_count == 0:
+        raise ValueError(f"Load completed but 0 rows in BigQuery for date {date_str}")
+
+    logger.info("Successfully loaded %d rows for date %s", row_count, date_str)
+    return result
 
 
 load_task = PythonOperator(
