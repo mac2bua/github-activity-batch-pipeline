@@ -1,4 +1,4 @@
-# GitHub Activity Batch Pipeline
+# GitHub AI Contributions
 
 **DE Zoomcamp 2026 Final Project**
 
@@ -6,9 +6,106 @@ A batch processing pipeline analyzing **AI coding agent contributions** on GitHu
 
 ---
 
+## Architecture
+
+```
++---------------------+     +---------------------+     +---------------------+
+|   GitHub Archive    |     |   Apache Airflow    |     |    GCS Bucket       |
+|   gharchive.org     |---->|   Docker Compose    |---->|   Raw JSON.gz       |
+|   24 files/day      |     |   Celery Executor   |     |   90-day TTL        |
++---------------------+     +---------------------+     +----------+----------+
+                                                                   |
+                                                                   v
+                                                        +----------+----------+
+                                                        |    BigQuery         |
+                                                        |   Partitioned DAY   |
+                                                        |   Clustered 3 fields|
+                                                        +----------+----------+
+                                                                   |
+                                                                   v
+                                                        +----------+----------+
+                                                        |    dbt 1.9+         |
+                                                        |   1 Staging View    |
+                                                        |   3 Mart Tables     |
+                                                        +----------+----------+
+                                                                   |
+                                                                   v
+                                                        +----------+----------+
+                                                        |   Looker Studio     |
+                                                        |   AI Agent Dashboard|
+                                                        |   7+ Charts         |
+                                                        +---------------------+
+```
+
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| Orchestration | Apache Airflow 2.8.0 (Docker Compose) | DAG scheduling, data pipeline |
+| Storage | GCS + BigQuery | Raw files + partitioned warehouse |
+| Transformation | dbt 1.9+ | 1 staging + 3 mart models |
+| Visualization | Looker Studio | 7+ interactive charts |
+
+---
+
+## Project Structure
+
+```
+github-ai-contributions/
++-- airflow/
+|   +-- dags/                    # Airflow DAG files
+|       +-- github_activity_pipeline.py
++-- dbt/
+|   +-- models/                  # dbt transformation models
+|       +-- staging/
+|       +-- marts/
++-- terraform/                   # Infrastructure as Code
+|   +-- main.tf
+|   +-- variables.tf
+|   +-- outputs.tf
++-- tests/                       # Pytest test suites
++-- scripts/                     # Validation scripts
++-- Makefile                     # Build automation
++-- docker-compose.yml           # Airflow stack config
++-- README.md
+```
+
+---
+
+## Pipeline Workflow
+
+```
++------------------------+     +------------------------+     +------------------------+
+| download_github_archive|     | upload_to_gcs          |     | validate_data_quality  |
+|                        |---->|                        |---->|                        |
+| Download 24 hourly     |     | Upload raw JSON.gz     |     | Check JSON structure   |
+| files from GH Archive  |     | to GCS bucket           |     | Verify required fields |
++------------------------+     +------------------------+     +-----------+------------+
+                                                            |
+                                                            v
++------------------------+     +------------------------+     +------------------------+
+| cleanup_temp_files     |     | load_to_bigquery       |     | transform_data         |
+|                        |<----|                        |<----|                        |
+| Remove local temp      |     | Load to partitioned    |     | Flatten nested JSON   |
+| files, free disk       |     | BigQuery table         |     | Convert to BQ schema   |
++------------------------+     +------------------------+     +------------------------+
+```
+
+| Task | Description |
+|------|-------------|
+| `download_github_archive` | Downloads GitHub Archive JSON for specified date (24 hours) |
+| `upload_to_gcs` | Uploads raw data to GCS |
+| `validate_data_quality` | Validates JSON structure and required fields |
+| `transform_data` | Transforms to BigQuery-compatible schema |
+| `load_to_bigquery` | Loads to partitioned BigQuery table |
+| `cleanup_temp_files` | Removes temporary files |
+
+**Note:** DAG runs in TEST_MODE (50k records per file) for faster execution. See `airflow/dags/github_activity_pipeline.py` for production configuration.
+
+---
+
 ## Quick Start
 
 ### Prerequisites
+
 - Docker + Docker Compose
 - Terraform >= 1.0
 - gcloud CLI + GCP project with billing enabled
@@ -16,52 +113,129 @@ A batch processing pipeline analyzing **AI coding agent contributions** on GitHu
 
 ### 1. Configure Environment
 
+Create a GCP service account with BigQuery and Storage permissions:
+
 ```bash
-# Create service account and download key
+# Create service account
 gcloud iam service-accounts create github-activity-pipeline
+
+# Grant BigQuery admin role
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member="serviceAccount:github-activity-pipeline@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/bigquery.admin"
+
+# Grant Storage admin role
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member="serviceAccount:github-activity-pipeline@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/storage.admin"
+
+# Download credentials
 gcloud iam service-accounts keys create keys/gcp-creds.json \
   --iam-account=github-activity-pipeline@YOUR_PROJECT_ID.iam.gserviceaccount.com
 ```
 
 ### 2. Create `.env` File
 
+Copy the example file and configure:
+
 ```bash
-cat > .env << EOF
+cp .env.example .env
+```
+
+Edit `.env` with your values:
+
+```bash
 GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID
 GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/keys/gcp-creds.json
 AIRFLOW_UID=50000
 AIRFLOW__CORE__FERNET_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
-EOF
 ```
 
 ### 3. Deploy Infrastructure
 
-```bash
-make terraform-init
-make terraform-apply PROJECT_ID=YOUR_PROJECT_ID
-```
+1. Initialize Terraform:
+
+   ```bash
+   make terraform-init
+   ```
+
+2. Review planned changes:
+
+   ```bash
+   make terraform-plan PROJECT_ID=YOUR_PROJECT_ID
+   ```
+
+   This shows what resources will be created (GCS bucket, BigQuery dataset/table).
+
+3. Apply changes:
+
+   ```bash
+   make terraform-apply PROJECT_ID=YOUR_PROJECT_ID
+   ```
 
 ### 4. Start Airflow
 
-```bash
-make airflow-up
-# Wait 2 minutes, then access: http://localhost:8080 (admin/admin)
-```
+1. Start the Airflow stack:
+
+   ```bash
+   make airflow-up
+   ```
+
+2. Wait for Airflow to initialize (~2 minutes). Check status:
+
+   ```bash
+   docker compose ps
+   ```
+
+   All services should show "running" status.
+
+3. Access the Airflow UI:
+
+   - URL: http://localhost:8080
+   - Username: `admin`
+   - Password: `admin`
+
+4. If DAGs don't appear, restart the scheduler:
+
+   ```bash
+   docker compose restart airflow-scheduler
+   ```
+
+5. Set the Airflow Variable for GCP project:
+   - Go to Admin -> Variables
+   - Add variable: `project_id` = `YOUR_PROJECT_ID`
 
 ### 5. Set Up dbt
 
-```bash
-# Create virtual environment for dbt (separate from Airflow which runs in Docker)
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt  # Installs dbt-bigquery + pytest
-```
+1. Authenticate with GCP:
+
+   ```bash
+   gcloud auth application-default login
+   ```
+
+2. Create virtual environment and install dependencies:
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+3. Configure dbt profile (if not auto-detected):
+
+   ```bash
+   mkdir -p ~/.dbt
+   cat > ~/.dbt/profiles.yml << EOF
+   github_activity:
+     target: dev
+     outputs:
+       dev:
+         type: bigquery
+         project: YOUR_PROJECT_ID
+         dataset: github_activity
+         method: oauth
+   EOF
+   ```
 
 **Note:** Airflow runs in Docker with the official `apache/airflow:2.8.0` image.
 The `requirements.txt` is for local dbt transformations and testing only.
@@ -71,57 +245,23 @@ The `requirements.txt` is for local dbt transformations and testing only.
 1. **Trigger Airflow DAG:**
    - Open http://localhost:8080
    - Toggle `github_activity_batch_pipeline` DAG to **Active**
-   - Click **Play** → **Trigger DAG w/ config** → set `execution_date` (e.g., `2026-03-28`)
+   - Click **Play** -> **Trigger DAG w/ config** -> set `execution_date` (e.g., `2026-03-28`)
    - Each run downloads 24 hours of data (~5 min)
 
 2. **Run dbt transformations:**
+
    ```bash
    make dbt-build   # Runs: deps + run + test
    ```
 
 3. **Verify data:**
+
    ```bash
    bq query --use_legacy_sql=false \
      "SELECT event_date, COUNT(*) as events
       FROM github_activity.github_events
       GROUP BY event_date ORDER BY event_date"
    ```
-
----
-
-## Architecture
-
-```
-GitHub Archive → Airflow (Docker) → GCS → BigQuery → dbt → Looker Studio
-```
-
-| Component | Technology |
-|-----------|------------|
-| Orchestration | Apache Airflow 2.8.0 (Docker Compose) |
-| Storage | GCS + BigQuery (partitioned by day, clustered by repo/actor/type) |
-| Transformation | dbt (1 staging + 3 marts) |
-| Visualization | Looker Studio |
-
----
-
-## Pipeline Workflow
-
-### Airflow DAG (6 tasks)
-
-```
-download_github_archive → upload_to_gcs → validate_data_quality → transform_data → load_to_bigquery → cleanup_temp_files
-```
-
-| Task | Description |
-|------|-------------|
-| download_github_archive | Downloads GitHub Archive JSON for specified date (24 hours) |
-| upload_to_gcs | Uploads raw data to GCS |
-| validate_data_quality | Validates JSON structure and required fields |
-| transform_data | Transforms to BigQuery-compatible schema (~50k records/hour) |
-| load_to_bigquery | Loads to partitioned BigQuery table |
-| cleanup_temp_files | Removes temporary files |
-
-**Note:** DAG runs in TEST_MODE (50k records per file) for faster execution. See `airflow/dags/github_activity_pipeline.py` for production configuration.
 
 ---
 
@@ -151,7 +291,7 @@ Verify: `bq query "SELECT * FROM github_activity.ai_agent_stats LIMIT 10"`
 ### Looker Studio
 
 1. Go to https://lookerstudio.google.com/
-2. Create → Report → BigQuery connector
+2. Create -> Report -> BigQuery connector
 3. Select: `YOUR_PROJECT_ID.github_activity.ai_agent_stats`
 
 **Dashboard Visualizations (7+ charts):**
@@ -184,46 +324,33 @@ make test-dbt          # dbt model tests
 
 ---
 
-## Requirements Coverage
+## Peer-Review Guide
 
-| Criterion | Implementation |
-|-----------|----------------|
-| Problem description | README + architecture + AI agent focus |
-| Cloud + IaC | Terraform: GCS + BigQuery partitioned/clustered |
-| Data ingestion | Airflow DAG: 6 tasks |
-| Data warehouse | BigQuery: Partitioned by DAY, clustered by 3 fields |
-| Transformations | dbt: 1 staging + 3 marts with 32 tests |
-| Dashboard | Looker Studio: 7+ visualizations for AI agent analytics |
-| Reproducibility | Docker Compose, Makefile, complete README |
+This section helps reviewers verify the project meets DE Zoomcamp criteria.
 
----
+### Checklist for Reviewers
 
-## Project Structure
+| Criterion | Location | How to Verify |
+|-----------|----------|---------------|
+| Problem description | README.md, CLAUDE.md | Read project overview |
+| Cloud + IaC | terraform/ | Run `make terraform-plan` |
+| Data ingestion | airflow/dags/ | Check DAG structure with `make test-airflow` |
+| Data warehouse | BigQuery console | Verify table is partitioned & clustered |
+| Transformations | dbt/models/ | Run `make dbt-test` |
+| Dashboard | Looker Studio link | Open dashboard URL |
+| Reproducibility | All files | Run `make validate && make test` |
 
-```
-github-activity-batch-pipeline/
-├── terraform/              # GCS + BigQuery infrastructure
-├── airflow/dags/           # DAGs (6-task main + 3-task archive)
-├�── dbt/models/            # Staging + 3 marts
-├── tests/                  # Pytest suites
-├── scripts/                # Validation scripts
-├── docker-compose.yml      # Airflow stack
-├── Makefile                # Common commands
-└── TROUBLESHOOTING.md      # Detailed troubleshooting
-```
-
----
-
-## Common Commands
+### Verification Commands
 
 ```bash
-make help              # Show all commands
-make deploy            # Full deployment
-make airflow-up        # Start Airflow
-make airflow-down      # Stop Airflow
-make dbt-build         # Run dbt (deps + run + test)
-make test              # Run pytest tests
-make validate          # Run validation scripts
+# Run all validations
+make validate
+
+# Run all tests
+make test
+
+# Full deployment test
+make deploy
 ```
 
 ---

@@ -1,4 +1,4 @@
-# Terraform configuration for GitHub Activity Batch Pipeline
+# Terraform configuration for GitHub AI Contributions
 # Creates GCS bucket and BigQuery partitioned/clustered table
 
 terraform {

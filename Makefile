@@ -1,11 +1,11 @@
-# GitHub Activity Batch Pipeline - Makefile
+# GitHub AI Contributions - Makefile
 # Common commands for development and deployment
 
 .PHONY: help terraform-init terraform-apply terraform-destroy airflow-up airflow-down dbt-run dbt-test test validate clean
 
 # Default target
 help: ## Show this help message
-	@echo "GitHub Activity Batch Pipeline - Available Commands"
+	@echo "GitHub AI Contributions - Available Commands"
 	@echo ""
 	@echo "Usage: make [command]"
 	@echo ""

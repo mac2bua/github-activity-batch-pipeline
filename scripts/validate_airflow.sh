@@ -1,6 +1,8 @@
 #!/bin/bash
 # Validate Airflow DAG syntax and configuration
 # Usage: ./scripts/validate_airflow.sh
+# Returns: 0 = pass, 1 = fail, 2 = skipped
+
 set -e
 
 echo "🔍 Validating Airflow DAGs..."
@@ -11,6 +13,7 @@ DAG_DIR="$PROJECT_ROOT/airflow/dags"
 
 # Track validation status
 VALIDATION_PASSED=true
+SKIPPED=false
 
 # Check if DAG directory exists
 if [ ! -d "$DAG_DIR" ]; then
@@ -37,7 +40,7 @@ for DAG_FILE in $DAG_FILES; do
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "Validating: $(basename "$DAG_FILE")"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    
+
     # Check Python syntax
     echo "✅ Checking Python syntax..."
     if python3 -m py_compile "$DAG_FILE" 2>/dev/null; then
@@ -102,7 +105,7 @@ if dag_found:
 else:
     print('   ✗ No DAG definition found')
     exit(1)
-    
+
 if task_count >= 3:
     print('   ✓ Minimum 3 tasks requirement met')
 else:
@@ -148,7 +151,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 # Try to import DAGs and instantiate operators
 # Note: This test requires Airflow to be installed. Skip if not available.
 export DAG_DIR="$DAG_DIR"
-python3 << 'PYTHON_SCRIPT' || VALIDATION_PASSED=false
+python3 << 'PYTHON_SCRIPT'
 import sys
 import importlib.util
 import os
@@ -162,8 +165,8 @@ airflow_providers_spec = importlib.util.find_spec('airflow.providers')
 if airflow_providers_spec is None:
     print('   ⚠ Airflow providers not installed - skipping DAG parsing test')
     print('   Install with: pip install apache-airflow apache-airflow-providers-google')
-    print('   (This is OK for syntax-only validation)')
-    sys.exit(0)
+    print('   (This is required for full validation)')
+    sys.exit(2)  # Exit code 2 = skipped
 
 sys.path.insert(0, DAG_DIR)
 
@@ -174,21 +177,21 @@ try:
     import github_activity_pipeline
     import github_archive_dag
     print('   ✓ Both DAGs imported successfully')
-    
+
     # Verify DAGs exist
     assert github_activity_pipeline.dag is not None
     assert github_archive_dag.dag is not None
     print('   ✓ DAG objects created')
-    
+
     # Verify tasks can be accessed
     for dag in [github_activity_pipeline.dag, github_archive_dag.dag]:
         for task in dag.tasks:
             assert task.task_id is not None
     print('   ✓ All tasks accessible')
-    
+
     # Test GCSToBigQueryOperator with valid params only
     from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
-    
+
     # This should work (Airflow 2.8+ compatible params)
     test_op = GCSToBigQueryOperator(
         task_id='test_valid_params',
@@ -200,14 +203,14 @@ try:
         dag=None,
     )
     print('   ✓ GCSToBigQueryOperator accepts valid params')
-    
+
     # Verify load_task in github_activity_pipeline doesn't have invalid params
     load_task = None
     for task in github_activity_pipeline.dag.tasks:
         if task.task_id == 'load_to_bigquery':
             load_task = task
             break
-    
+
     if load_task:
         kwargs = load_task.kwargs if hasattr(load_task, 'kwargs') else {}
         if 'clustering_fields' in kwargs:
@@ -220,10 +223,11 @@ try:
             print('   ✗ ERROR: time_partitioning still present (incompatible with Airflow 2.8+)')
             sys.exit(1)
         print('   ✓ GCSToBigQueryOperator has no invalid params')
-    
+
     print('')
     print('   All DAG parsing tests passed!')
-    
+    sys.exit(0)
+
 except TypeError as e:
     if 'clustering_fields' in str(e) or 'schema' in str(e):
         print(f'   ✗ ERROR: Invalid operator parameters: {e}')
@@ -240,12 +244,27 @@ except Exception as e:
     sys.exit(1)
 PYTHON_SCRIPT
 
+PARSING_EXIT_CODE=$?
+
+if [ $PARSING_EXIT_CODE -eq 2 ]; then
+    SKIPPED=true
+    echo ""
+    echo "⚠️  DAG parsing test SKIPPED (Airflow not installed)"
+elif [ $PARSING_EXIT_CODE -eq 1 ]; then
+    VALIDATION_PASSED=false
+fi
+
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$VALIDATION_PASSED" = true ]; then
-    echo "✅ All Airflow DAG validations passed!"
-    exit 0
+    if [ "$SKIPPED" = true ]; then
+        echo "⚠️  Airflow validation passed (parsing test skipped)"
+        exit 2  # Exit code 2 = partial/skipped
+    else
+        echo "✅ All Airflow DAG validations passed!"
+        exit 0
+    fi
 else
     echo "❌ Some validations failed. Please review the errors above."
     exit 1

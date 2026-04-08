@@ -1,4 +1,4 @@
-# Python dependencies for GitHub Activity Batch Pipeline
+# Python dependencies for GitHub AI Contributions
 # Compatible with Python 3.9-3.12
 
 # Airflow (needed for local DAG testing; production runs apache/airflow:2.8.0 in Docker)

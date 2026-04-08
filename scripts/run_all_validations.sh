@@ -1,35 +1,49 @@
 #!/bin/bash
-# Run all validations for the GitHub Activity Batch Pipeline
+# Run all validations for the GitHub AI Contributions pipeline
 # Compatible with bash 3.2+ (macOS)
 
 set -e
 
 echo "╔══════════════════════════════════════════════════════════╗"
-echo "║  GitHub Activity Batch Pipeline - Validation Suite      ║"
+echo "║  GitHub AI Contributions - Validation Suite               ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Track validation results (using simple variables for bash 3.2 compatibility)
-RESULT_TERRAFORM=""
-RESULT_AIRFLOW=""
-RESULT_DBT=""
-RESULT_DOCKER=""
-RESULT_README=""
+# Track validation results
+# Values: PASS, FAIL, SKIP
+RESULT_TERRAFORM="FAIL"
+RESULT_AIRFLOW="FAIL"
+RESULT_DBT="FAIL"
+RESULT_DOCKER="FAIL"
+RESULT_README="FAIL"
 PASS_COUNT=0
+SKIP_COUNT=0
 TOTAL=5
+
+# Helper function to convert exit codes to status
+exit_to_status() {
+    local exit_code=$1
+    if [ $exit_code -eq 0 ]; then
+        echo "PASS"
+    elif [ $exit_code -eq 2 ]; then
+        echo "SKIP"
+    else
+        echo "FAIL"
+    fi
+}
 
 # Validate Terraform
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "1️⃣  TERRAFORM VALIDATION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if bash "$SCRIPT_DIR/validate_terraform.sh"; then
-    RESULT_TERRAFORM="✅ PASS"
+    RESULT_TERRAFORM="PASS"
     PASS_COUNT=$((PASS_COUNT + 1))
 else
-    RESULT_TERRAFORM="❌ FAIL"
+    RESULT_TERRAFORM="FAIL"
 fi
 echo ""
 
@@ -37,11 +51,13 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "2️⃣  AIRFLOW VALIDATION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if bash "$SCRIPT_DIR/validate_airflow.sh"; then
-    RESULT_AIRFLOW="✅ PASS"
+AIRFLOW_EXIT=0
+bash "$SCRIPT_DIR/validate_airflow.sh" || AIRFLOW_EXIT=$?
+RESULT_AIRFLOW=$(exit_to_status $AIRFLOW_EXIT)
+if [ "$RESULT_AIRFLOW" = "PASS" ]; then
     PASS_COUNT=$((PASS_COUNT + 1))
-else
-    RESULT_AIRFLOW="❌ FAIL"
+elif [ "$RESULT_AIRFLOW" = "SKIP" ]; then
+    SKIP_COUNT=$((SKIP_COUNT + 1))
 fi
 echo ""
 
@@ -49,11 +65,13 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "3️⃣  DBT VALIDATION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if bash "$SCRIPT_DIR/validate_dbt.sh"; then
-    RESULT_DBT="✅ PASS"
+DBT_EXIT=0
+bash "$SCRIPT_DIR/validate_dbt.sh" || DBT_EXIT=$?
+RESULT_DBT=$(exit_to_status $DBT_EXIT)
+if [ "$RESULT_DBT" = "PASS" ]; then
     PASS_COUNT=$((PASS_COUNT + 1))
-else
-    RESULT_DBT="❌ FAIL"
+elif [ "$RESULT_DBT" = "SKIP" ]; then
+    SKIP_COUNT=$((SKIP_COUNT + 1))
 fi
 echo ""
 
@@ -66,19 +84,20 @@ if [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
     if command -v docker &> /dev/null; then
         if docker compose config --quiet 2>/dev/null; then
             echo "✅ Docker Compose syntax valid"
-            RESULT_DOCKER="✅ PASS"
+            RESULT_DOCKER="PASS"
             PASS_COUNT=$((PASS_COUNT + 1))
         else
             echo "❌ Docker Compose syntax error"
-            RESULT_DOCKER="❌ FAIL"
+            RESULT_DOCKER="FAIL"
         fi
     else
-        echo "ℹ️  Docker not installed, skipping config validation"
-        RESULT_DOCKER="⚠️  SKIP"
+        echo "⚠️  Docker not installed - skipping config validation"
+        RESULT_DOCKER="SKIP"
+        SKIP_COUNT=$((SKIP_COUNT + 1))
     fi
 else
     echo "❌ docker-compose.yml not found"
-    RESULT_DOCKER="❌ FAIL"
+    RESULT_DOCKER="FAIL"
 fi
 echo ""
 
@@ -92,15 +111,15 @@ if [ -f "$PROJECT_DIR/README.md" ]; then
     echo "   Word count: $word_count"
     if [ "$word_count" -gt 500 ]; then
         echo "   ✅ README is comprehensive"
-        RESULT_README="✅ PASS"
+        RESULT_README="PASS"
         PASS_COUNT=$((PASS_COUNT + 1))
     else
         echo "   ⚠️  README may be too short"
-        RESULT_README="⚠️  WARN"
+        RESULT_README="WARN"
     fi
 else
     echo "❌ README.md not found"
-    RESULT_README="❌ FAIL"
+    RESULT_README="FAIL"
 fi
 echo ""
 
@@ -115,12 +134,23 @@ printf "%-20s %s\n" "dbt:" "$RESULT_DBT"
 printf "%-20s %s\n" "Docker Compose:" "$RESULT_DOCKER"
 printf "%-20s %s\n" "Documentation:" "$RESULT_README"
 echo ""
-echo "Passed: $PASS_COUNT/$TOTAL"
 
-if [ $PASS_COUNT -eq $TOTAL ]; then
-    echo "🎉 All validations passed!"
+# Calculate results
+FAIL_COUNT=$((TOTAL - PASS_COUNT - SKIP_COUNT))
+
+echo "Results: $PASS_COUNT passed, $SKIP_COUNT skipped, $FAIL_COUNT failed"
+echo ""
+
+if [ $FAIL_COUNT -gt 0 ]; then
+    echo "❌ Some validations FAILED. Please fix the errors above."
+    exit 1
+elif [ $SKIP_COUNT -gt 0 ]; then
+    echo "⚠️  All validations passed or were skipped."
+    echo "   To run skipped validations, install:"
+    echo "   - pip install apache-airflow apache-airflow-providers-google"
+    echo "   - pip install dbt-bigquery"
     exit 0
 else
-    echo "⚠️  Some validations failed or have warnings"
-    exit 1
+    echo "🎉 All validations passed!"
+    exit 0
 fi

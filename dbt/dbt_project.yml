@@ -1,5 +1,5 @@
 # dbt Project Configuration
-# GitHub Activity Batch Pipeline
+# GitHub AI Contributions
 
 name: 'github_activity'
 version: '1.0.0'
