@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-Common issues and solutions for the GitHub Activity Batch Pipeline.
+Common issues and solutions for the GitHub AI Contributions pipeline.
 
 ## Airflow Issues
 
@@ -449,15 +449,160 @@ gcloud projects add-iam-policy-binding <project_id> \
   --role="roles/storage.admin"
 ```
 
+## DAG Operations
+
+### Trigger DAG for a Specific Date
+
+Run the pipeline for a specific date (useful for backfilling):
+
+```bash
+# Trigger for a single date
+# Note: The DAG processes execution_date - 1 day (GH Archive delay)
+# Example: --exec-date 2026-04-08 will process April 7 data
+docker compose exec airflow-scheduler \
+  airflow dags trigger github_activity_batch_pipeline --exec-date 2026-04-08
+
+# Trigger for multiple dates (backfill)
+for date in 2026-04-04 2026-04-05 2026-04-06; do
+  docker compose exec airflow-scheduler \
+    airflow dags trigger github_activity_batch_pipeline --exec-date $date
+done
+```
+
+**Important**: The DAG is scheduled at 12:00 UTC and processes the **previous day's** data.
+This is because GH Archive has a ~6-12 hour delay before data is available.
+
+| Run Time | execution_date | Processes |
+|----------|---------------|-----------|
+| April 8, 12:00 UTC | April 8 | April 7 data |
+| April 9, 12:00 UTC | April 9 | April 8 data |
+
+### Check DAG Run Status
+
+View recent runs and their states:
+
+```bash
+# List recent runs
+docker compose exec airflow-scheduler \
+  airflow dags list-runs -d github_activity_batch_pipeline | head -10
+
+# Check specific run tasks
+docker compose exec airflow-scheduler \
+  airflow tasks states-for-dag-run github_activity_batch_pipeline 'scheduled__2026-04-07T00:00:00+00:00'
+```
+
+### Clear Failed Tasks
+
+Retry a failed DAG run:
+
+```bash
+# Clear all tasks for a specific date
+docker compose exec airflow-scheduler \
+  airflow tasks clear github_activity_batch_pipeline -s 2026-04-07 -e 2026-04-07 -y
+
+# Clear tasks for a date range
+docker compose exec airflow-scheduler \
+  airflow tasks clear github_activity_batch_pipeline -s 2026-04-01 -e 2026-04-07 -y
+```
+
+### Enable Automatic Backfill (Catchup)
+
+By default, catchup is disabled. To enable automatic backfill for missing dates:
+
+1. Edit `airflow/dags/github_activity_pipeline.py`:
+   ```python
+   'catchup': True,  # Change from False to True
+   ```
+
+2. Restart the scheduler:
+   ```bash
+   docker compose restart airflow-scheduler
+   ```
+
+The DAG will automatically schedule all missing runs from `start_date` to now.
+
+### Handle Missing Data Dates
+
+If a date has no data in BigQuery (e.g., GH Archive delay):
+
+1. **Check if data exists on GH Archive**:
+   ```bash
+   curl -sI "https://data.gharchive.org/2026-04-04-12.json.gz" | head -1
+   # HTTP/2 200 = data exists
+   # HTTP/2 404 = data not available
+   ```
+
+2. **Re-run the DAG for that date**:
+   ```bash
+   docker compose exec airflow-scheduler \
+     airflow dags trigger github_activity_batch_pipeline --exec-date 2026-04-04
+   ```
+
+3. **Verify data loaded**:
+   ```bash
+   bq query --use_legacy_sql=false \
+     "SELECT COUNT(*) FROM github_activity.github_events WHERE event_date = '2026-04-04'"
+   ```
+
+### Handle Duplicate Data
+
+If the same date was loaded twice (duplicate records):
+
+1. **Delete duplicates from BigQuery**:
+   ```bash
+   bq query --use_legacy_sql=false \
+     "DELETE FROM github_activity.github_events WHERE event_date = '2026-04-05'"
+   ```
+
+2. **Re-run DAG once**:
+   ```bash
+   docker compose exec airflow-scheduler \
+     airflow dags trigger github_activity_batch_pipeline --exec-date 2026-04-05
+   ```
+
+3. **Verify count is correct**:
+   ```bash
+   bq query --use_legacy_sql=false \
+     "SELECT event_date, COUNT(*) as events FROM github_activity.github_events
+      WHERE event_date >= '2026-04-01' GROUP BY event_date ORDER BY event_date"
+   ```
+
+### Query Data by Date
+
+Check data counts per day:
+
+```bash
+bq query --use_legacy_sql=false \
+  "SELECT event_date, COUNT(*) as events
+   FROM github_activity.github_events
+   GROUP BY event_date ORDER BY event_date"
+```
+
+### Worker Volume Mount Issues
+
+If tasks fail with `FileNotFoundError` for log directories:
+
+```bash
+# Check worker sees logs directory
+docker compose exec airflow-worker ls -la /opt/airflow/logs
+
+# If empty, restart worker to pick up volume mount
+docker compose restart airflow-worker
+
+# Then clear and retry failed tasks
+docker compose exec airflow-scheduler \
+  airflow tasks clear github_activity_batch_pipeline -s 2026-04-07 -e 2026-04-07 -y
+```
+
 ## Getting Help
 
 If issues persist:
 
 1. **Check logs**: `docker compose logs -f`
-2. **Review documentation**: README.md, architecture.md
+2. **Review documentation**: README.md, CLAUDE.md
 3. **Search issues**: GitHub Issues
 4. **Contact team**: See CHECKLIST.md for contacts
 
 ---
 
-**Last Updated**: 2024-04-03
+**Last Updated**: 2026-04-08

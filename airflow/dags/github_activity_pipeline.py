@@ -19,7 +19,8 @@ Tags:
     github, batch, analytics, gcs, bigquery
 
 Schedule:
-    Daily at midnight with catchup enabled for backfilling.
+    Daily at 12:00 UTC (processes previous day's data).
+    GH Archive has ~6-12 hour delay, so day D data is available on day D+1.
 """
 
 from __future__ import annotations
@@ -55,10 +56,13 @@ DEFAULT_ARGS: dict[str, Any] = {
 }
 
 # DAG configuration
+# Schedule at 12:00 UTC daily to ensure GH Archive data is available
+# GH Archive has ~6-12 hour delay, so day D data is fully available on day D+1
+# We process execution_date - 1 day to always get the previous day's data
 DAG_CONFIG: dict[str, Any] = {
     'default_args': DEFAULT_ARGS,
     'description': 'Batch process GitHub activity data from GHE archive to BigQuery',
-    'schedule_interval': '@daily',
+    'schedule_interval': '0 12 * * *',  # 12:00 UTC daily
     'catchup': False,  # Disable catchup for E2E testing - no backfill needed
     'max_active_runs': 1,
     'tags': ['github', 'batch', 'analytics'],
@@ -142,7 +146,8 @@ def download_github_archive(**context: Any) -> str:
         str: Summary of downloaded files.
     """
     execution_date = context['execution_date']
-    date_str = execution_date.strftime('%Y-%m-%d')
+    # Process previous day's data (GH Archive has ~6-12 hour delay)
+    date_str = (execution_date - timedelta(days=1)).strftime('%Y-%m-%d')
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     downloaded_files: list[str] = []
@@ -416,7 +421,8 @@ def transform_ghe_to_schema(**context: Any) -> str:
 
     # Get execution_date from context to filter files
     execution_date = context['execution_date']
-    date_str = execution_date.strftime('%Y-%m-%d')
+    # Process previous day's data (GH Archive has ~6-12 hour delay)
+    date_str = (execution_date - timedelta(days=1)).strftime('%Y-%m-%d')
 
     # List source files for this execution date only
     # Format: data/{date}-{hour}.json.gz
@@ -570,9 +576,29 @@ def load_to_bigquery_date_specific(**context: Any) -> str:
 
     This ensures each DAG run only loads its own date's data,
     preventing cross-contamination between different dates.
+
+    Makes the load idempotent by deleting existing data for the date
+    before loading new data, preventing duplicates from re-runs.
     """
+    from google.cloud import bigquery
+
     execution_date = context['execution_date']
-    date_str = execution_date.strftime('%Y-%m-%d')
+    # Process previous day's data (GH Archive has ~6-12 hour delay)
+    date_str = (execution_date - timedelta(days=1)).strftime('%Y-%m-%d')
+
+    # Delete existing data for this date (idempotency - prevents duplicates)
+    client = bigquery.Client(project=PROJECT_ID)
+    table_id = f'{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}'
+
+    delete_query = f"""
+        DELETE FROM `{table_id}`
+        WHERE event_date = '{date_str}'
+    """
+
+    logger.info("Deleting existing data for date=%s", date_str)
+    delete_job = client.query(delete_query)
+    delete_job.result()  # Wait for completion
+    logger.info("Deleted %d rows for date=%s", delete_job.num_dml_affected_rows, date_str)
 
     # Only load files for this execution_date
     source_objects = [f'transformed/{date_str}-*.json.gz']
@@ -586,7 +612,7 @@ def load_to_bigquery_date_specific(**context: Any) -> str:
         destination_project_dataset_table=f'{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}',
         schema_fields=BQ_SCHEMA,
         source_format='NEWLINE_DELIMITED_JSON',
-        write_disposition='WRITE_APPEND',
+        write_disposition='WRITE_APPEND',  # Safe because we deleted existing data first
         create_disposition='CREATE_IF_NEEDED',
         max_bad_records=100,
         allow_quoted_newlines=True,
