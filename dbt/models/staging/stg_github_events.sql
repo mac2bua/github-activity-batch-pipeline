@@ -61,8 +61,8 @@ cleaned as (
         -- Distinguishes between AI coding agents (write code) and automation bots (run tasks)
         case
             -- Known AI coding agents (write/review code, generate content)
-            -- Claude appears as both "Claude" and "claude[bot]" depending on context
-            when lower(actor_login) like 'claude%' then true
+            -- Claude appears as both "Claude" (app) and "claude[bot]" depending on context
+            when actor_login in ('Claude', 'claude[bot]', 'Claude[bot]') then true
             when actor_login in ('Copilot', 'copilot[bot]', 'github-copilot[bot]', 'copilot-pull-request-review[bot]') then true
             when actor_login = 'cursor[bot]' then true
             when actor_login in ('coderabbitai[bot]', 'coderabbitai-qa[bot]', 'coderabbitaidev[bot]') then true
@@ -77,7 +77,7 @@ cleaned as (
         case
             -- AI Coding Agents (write code, review PRs, generate content)
             -- Claude appears in multiple forms: "Claude" (app), "claude[bot]" (bot)
-            when lower(actor_login) like 'claude%' then 'Claude'
+            when actor_login in ('Claude', 'claude[bot]', 'Claude[bot]') then 'Claude'
             when actor_login in ('Copilot', 'copilot[bot]', 'github-copilot[bot]', 'copilot-pull-request-review[bot]') then 'Copilot'
             when actor_login = 'cursor[bot]' then 'Cursor'
             when actor_login in ('coderabbitai[bot]', 'coderabbitai-qa[bot]', 'coderabbitaidev[bot]') then 'CodeRabbit'
