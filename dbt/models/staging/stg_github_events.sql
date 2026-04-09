@@ -57,37 +57,46 @@ cleaned as (
             else true
         end as is_valid_repo,
 
-        -- AI Agent Detection (strict matching - no false positives)
-        -- Only classify as AI agent if it's a verified bot account
+        -- AI Agent Detection
+        -- Distinguishes between AI coding agents (write code) and automation bots (run tasks)
         case
-            -- Known AI coding agents (exact matches only)
-            when actor_login in ('Copilot', 'copilot[bot]', 'github-copilot[bot]') then true
-            when actor_login = 'claude[bot]' then true
+            -- Known AI coding agents (write/review code, generate content)
+            -- Claude appears as both "Claude" and "claude[bot]" depending on context
+            when lower(actor_login) like 'claude%' then true
+            when actor_login in ('Copilot', 'copilot[bot]', 'github-copilot[bot]', 'copilot-pull-request-review[bot]') then true
             when actor_login = 'cursor[bot]' then true
             when actor_login in ('coderabbitai[bot]', 'coderabbitai-qa[bot]', 'coderabbitaidev[bot]') then true
             when actor_login = 'lovable-dev[bot]' then true
-            when actor_login like 'dependabot%' then true
-            -- CI/CD and automation bots
-            when actor_login in ('github-actions[bot]', 'renovate[bot]', 'vercel[bot]', 'pull[bot]', 'swa-runner-app[bot]') then true
-            -- All other bots with [bot] suffix
-            when actor_login like '%[bot]' then true
+            when actor_login in ('gemini[bot]', 'gemini-code-assist[bot]') then true
+            when actor_login = 'chatgpt[bot]' then true
             else false
         end as is_ai_agent,
 
-        -- Actor type classification (strict matching to avoid false positives)
+        -- Actor type classification
+        -- Groups actors into meaningful categories for analytics
         case
-            -- AI Coding Agents (verified bot accounts only)
-            when actor_login in ('Copilot', 'copilot[bot]', 'github-copilot[bot]') then 'Copilot'
-            when actor_login = 'claude[bot]' then 'Claude'
+            -- AI Coding Agents (write code, review PRs, generate content)
+            -- Claude appears in multiple forms: "Claude" (app), "claude[bot]" (bot)
+            when lower(actor_login) like 'claude%' then 'Claude'
+            when actor_login in ('Copilot', 'copilot[bot]', 'github-copilot[bot]', 'copilot-pull-request-review[bot]') then 'Copilot'
             when actor_login = 'cursor[bot]' then 'Cursor'
             when actor_login in ('coderabbitai[bot]', 'coderabbitai-qa[bot]', 'coderabbitaidev[bot]') then 'CodeRabbit'
             when actor_login = 'lovable-dev[bot]' then 'Lovable'
+            when actor_login in ('gemini[bot]', 'gemini-code-assist[bot]') then 'Gemini'
+            when actor_login = 'chatgpt[bot]' then 'ChatGPT'
+
+            -- Dependency Management
             when actor_login like 'dependabot%' then 'Dependabot'
+            when actor_login in ('renovate[bot]', 'greenkeeper[bot]', 'pyup-bot', 'pyup%[bot]') then 'Dependabot'
 
-            -- CI/CD Bots (grouped category)
-            when actor_login in ('github-actions[bot]', 'renovate[bot]', 'vercel[bot]', 'pull[bot]', 'swa-runner-app[bot]') then 'CI/CD Bot'
+            -- CI/CD & Automation
+            when actor_login in ('github-actions[bot]', 'vercel[bot]', 'netlify[bot]', 'circleci[bot]', 'travis-ci[bot]') then 'CI/CD Bot'
+            when actor_login in ('pull[bot]', 'mergify[bot]', 'pytorch-bot[bot]', 'kennethreitz-release-bot') then 'CI/CD Bot'
 
-            -- Other automation with [bot] suffix
+            -- Security & Quality
+            when actor_login in ('snyk-bot', 'codecov-io[bot]', 'codecov[bot]', 'coveralls[bot]', 'imgbot', 'imgbot[bot]') then 'Security/Quality Bot'
+
+            -- All other [bot] accounts
             when actor_login like '%[bot]' then 'Other Bot'
 
             else 'Human'

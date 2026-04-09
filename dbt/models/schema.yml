@@ -111,11 +111,11 @@ models:
         tests:
           - not_null
       - name: actor_type
-        description: "Type of AI agent (Copilot, Claude, Cursor, CodeRabbit, Lovable, Dependabot, CI/CD Bot, Other Bot)"
+        description: "Type of AI agent (Copilot, Claude, Cursor, CodeRabbit, Lovable, Gemini, ChatGPT, Dependabot, CI/CD Bot, Security/Quality Bot, Other Bot)"
         tests:
           - not_null
           - accepted_values:
-              values: ['Copilot', 'Claude', 'Cursor', 'CodeRabbit', 'Lovable', 'Dependabot', 'CI/CD Bot', 'Other Bot', 'Human']
+              values: ['Copilot', 'Claude', 'Cursor', 'CodeRabbit', 'Lovable', 'Gemini', 'ChatGPT', 'Dependabot', 'CI/CD Bot', 'Security/Quality Bot', 'Other Bot', 'Human']
               quote: true
       - name: total_events
         description: "Total number of events by this agent type"
